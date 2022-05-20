@@ -1,0 +1,22 @@
+[package]
+name = "sitira-synth"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+cortex-m-rtic = "1.0.0"
+cortex-m = "^0.7.1"
+cortex-m-rt = { version = "^0.6.13", features = ["device"] }
+stm32h7xx-hal = { version = "0.11.0", features = [ "stm32h750v", "rt", "revision_v", "usb_hs" ] }
+cortex-m-semihosting = "0.3.5"
+panic-halt = "0.2.0"
+panic-semihosting = { version = "0.5.6" }
+libdaisy = { path = "../libdaisy-rust"}
+log = "0.4.11"
+rtt-target = { version = "0.3.0", features = ["cortex-m"], optional = true }
+
+# log-rtt = ["rtt-target", "panic-rtt-target"]
+# log-itm = ["panic-itm", "lazy_static", "cortex-m-log"]
+# log-semihosting = ["panic-semihosting", "lazy_static", "cortex-m-log", "cortex-m-semihosting"]
