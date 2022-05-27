@@ -13,10 +13,7 @@ stm32h7xx-hal = { version = "0.11.0", features = [ "stm32h750v", "rt", "revision
 cortex-m-semihosting = "0.3.5"
 panic-halt = "0.2.0"
 panic-semihosting = { version = "0.5.6" }
-libdaisy = { path = "../libdaisy-rust"}
-log = "0.4.11"
+libdaisy = { path = "../libdaisy-rust", features = ["log-rtt"]}
 rtt-target = { version = "0.3.0", features = ["cortex-m"], optional = true }
-
-# log-rtt = ["rtt-target", "panic-rtt-target"]
-# log-itm = ["panic-itm", "lazy_static", "cortex-m-log"]
-# log-semihosting = ["panic-semihosting", "lazy_static", "cortex-m-log", "cortex-m-semihosting"]
+log = "0.4.11"
+embedded-sdmmc = "0.3.0"
