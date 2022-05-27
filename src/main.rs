@@ -92,6 +92,17 @@ mod app {
             info!("Failed to init SD Card");
         }
 
+        // check sdram
+        let sdram = system.sdram;
+
+        let sdram_size_bytes = libdaisy::sdram::Sdram::bytes();
+        let sdram_size = sdram_size_bytes / core::mem::size_of::<u32>();
+
+        info!(
+            "SDRAM size: {} bytes, {} words starting at {:?}",
+            sdram_size_bytes, sdram_size, &sdram[0] as *const _
+        );
+
         // audio buffer
         let buffer = [(0.0, 0.0); audio::BLOCK_SIZE_MAX];
 
