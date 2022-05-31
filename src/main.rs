@@ -17,13 +17,18 @@ mod app {
 
     use stm32h7xx_hal::pac;
     #[shared]
-    struct Shared {}
+    struct Shared {
+        counter: usize,
+    }
 
     #[local]
     struct Local {
         audio: audio::Audio,
         buffer: audio::AudioBuffer,
+        sample_buffer: [f32; BUFFER_COUNT],
     }
+
+    const BUFFER_COUNT: usize = 6_000;
 
     struct FakeTime;
 
@@ -55,7 +60,7 @@ mod app {
 
         // setting up SD card connection
         let sdmmc_d = unsafe { pac::Peripherals::steal().SDMMC1 };
-        let mut gpios = system.gpio;
+        let gpios = system.gpio;
         let mut sd = sdmmc::init(
             gpios.daisy1.unwrap(),
             gpios.daisy2.unwrap(),
@@ -68,20 +73,51 @@ mod app {
             &mut ccdr.clocks,
         );
 
+        // check sdram
+        let sdram = system.sdram;
+
+        let sdram_size_bytes = libdaisy::sdram::Sdram::bytes();
+        let sdram_size = sdram_size_bytes / core::mem::size_of::<u32>();
+
+        info!(
+            "SDRAM size: {} bytes, {} words starting at {:?}",
+            sdram_size_bytes, sdram_size, &sdram[0] as *const _
+        );
+
+        let mut integer_buffer: [u8; BUFFER_COUNT] = [0; BUFFER_COUNT];                 // u8 sample buffer
+
+        let file_name = "KICADI~1.WAV";
+
         // initiate SD card connection
-        gpios.led.set_low().unwrap();
         if let Ok(_) = sd.init_card(50.mhz()) {
             info!("Got SD Card!");
             let mut sd_fatfs = Controller::new(sd.sdmmc_block_device(), FakeTime);
-            if let Ok(sd_fatfs_volume) = sd_fatfs.get_volume(VolumeIdx(0)) {
+            if let Ok(mut sd_fatfs_volume) = sd_fatfs.get_volume(VolumeIdx(0)) {
                 if let Ok(sd_fatfs_root_dir) = sd_fatfs.open_root_dir(&sd_fatfs_volume) {
+                    let mut sample_on_sd_card = sd_fatfs
+                        .open_file_in_dir(
+                            &mut sd_fatfs_volume,
+                            &sd_fatfs_root_dir,
+                            file_name,
+                            embedded_sdmmc::Mode::ReadOnly,
+                        )
+                        .unwrap();
+
+                    let sample_length = sample_on_sd_card.length();
+                    info!(
+                        "Open file KICADI~1.WAV!, length: {} MB",
+                        (sample_length / 1048576) as f32
+                    );
+
+                    // store wav file in flash
                     sd_fatfs
-                        .iterate_dir(&sd_fatfs_volume, &sd_fatfs_root_dir, |entry| {
-                            info!("{:?}", entry);
-                        })
+                        .read(
+                            &mut sd_fatfs_volume,
+                            &mut sample_on_sd_card,
+                            &mut integer_buffer,
+                        )
                         .unwrap();
                     sd_fatfs.close_dir(&sd_fatfs_volume, sd_fatfs_root_dir);
-                    gpios.led.set_high().unwrap();
                 } else {
                     info!("Failed to get root dir");
                 }
@@ -92,16 +128,33 @@ mod app {
             info!("Failed to init SD Card");
         }
 
-        // audio buffer
-        let buffer = [(0.0, 0.0); audio::BLOCK_SIZE_MAX];
+        let buffer = [(0.0, 0.0); audio::BLOCK_SIZE_MAX];               // audio ring buffer
+        let mut sample_buffer = [0.0; BUFFER_COUNT];                           // f32 sample buffer
+
+        // convert u8 sample buffer into f32
+        let range = sample_buffer.iter().skip(1).step_by(2).count();
+        for n in 0..range {
+            sample_buffer[n] =
+                ((u32::from_be_bytes([0, 0, integer_buffer[2 * n], integer_buffer[2 * n + 1]])
+                    as i32
+                    - 32768) as f32)
+                    / 65536.0;
+        }
+        let counter = 0;
+
+        info!(
+            "Output WAV file sample from position 2000 to 2050 to check, if any audio is present: {:?}",
+            &integer_buffer[2_000..2_050]
+        );
 
         info!("Startup done!");
 
         (
-            Shared {},
+            Shared { counter },
             Local {
                 audio: system.audio,
                 buffer,
+                sample_buffer,
             },
             init::Monotonics(),
         )
@@ -117,17 +170,30 @@ mod app {
     }
 
     // Interrupt handler for audio
-    #[task(binds = DMA1_STR1, local = [audio, buffer], priority = 8)]
-    fn audio_handler(ctx: audio_handler::Context) {
+    #[task(binds = DMA1_STR1, local = [audio, buffer, sample_buffer], shared = [counter], priority = 8)]
+    fn audio_handler(mut ctx: audio_handler::Context) {
         let audio = ctx.local.audio;
+
         let buffer = ctx.local.buffer;
 
-        if audio.get_stereo(buffer) {
-            for (left, right) in buffer {
-                audio.push_stereo((*left, *right)).unwrap();
+        let sample_buffer = ctx.local.sample_buffer;
+
+        ctx.shared.counter.lock(|counter| {
+            if audio.get_stereo(buffer) {
+                for (_left, _right) in buffer {
+                    audio
+                        .push_stereo((sample_buffer[*counter], sample_buffer[*counter]))
+                        .unwrap();
+
+                    *counter += 1;
+                }
+            } else {
+                info!("Error reading data!");
             }
-        } else {
-            info!("Error reading data!");
-        }
+
+            if *counter > 3_000 {
+                *counter = 0;
+            }
+        });
     }
 }
