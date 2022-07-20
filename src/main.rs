@@ -5,7 +5,7 @@
     peripherals = true,
 )]
 mod app {
-    use log::info;
+    use log::{error, info};
 
     use embedded_sdmmc::{Controller, TimeSource, Timestamp, VolumeIdx};
     use libdaisy::{
@@ -17,18 +17,16 @@ mod app {
 
     use stm32h7xx_hal::pac;
     #[shared]
-    struct Shared {
-        counter: usize,
-    }
+    struct Shared {}
 
     #[local]
     struct Local {
         audio: audio::Audio,
         buffer: audio::AudioBuffer,
-        sample_buffer: [f32; BUFFER_COUNT],
+        sdram: &'static mut [f32],
+        playhead: usize,
+        file_length_in_samples: usize,
     }
-
-    const BUFFER_COUNT: usize = 6_000;
 
     struct FakeTime;
 
@@ -75,86 +73,132 @@ mod app {
 
         // check sdram
         let sdram = system.sdram;
+        sdram.fill(0.0);
 
         let sdram_size_bytes = libdaisy::sdram::Sdram::bytes();
-        let sdram_size = sdram_size_bytes / core::mem::size_of::<u32>();
+        let sdram_size = sdram_size_bytes / core::mem::size_of::<f32>();
+        let sdram_address = core::ptr::addr_of!(sdram[0]);
 
         info!(
             "SDRAM size: {} bytes, {} words starting at {:?}",
-            sdram_size_bytes, sdram_size, &sdram[0] as *const _
+            sdram_size_bytes, sdram_size, sdram_address
         );
 
-        let mut integer_buffer: [u8; BUFFER_COUNT] = [0; BUFFER_COUNT];                 // u8 sample buffer
-
         let file_name = "KICADI~1.WAV";
+        let mut file_length_in_samples = 0;
 
         // initiate SD card connection
         if let Ok(_) = sd.init_card(50.mhz()) {
             info!("Got SD Card!");
-            let mut sd_fatfs = Controller::new(sd.sdmmc_block_device(), FakeTime);
-            if let Ok(mut sd_fatfs_volume) = sd_fatfs.get_volume(VolumeIdx(0)) {
-                if let Ok(sd_fatfs_root_dir) = sd_fatfs.open_root_dir(&sd_fatfs_volume) {
-                    let mut sample_on_sd_card = sd_fatfs
+            let mut sd_card = Controller::new(sd.sdmmc_block_device(), FakeTime);
+            if let Ok(mut fat_volume) = sd_card.get_volume(VolumeIdx(0)) {
+                if let Ok(fat_root_dir) = sd_card.open_root_dir(&fat_volume) {
+                    let mut file = sd_card
                         .open_file_in_dir(
-                            &mut sd_fatfs_volume,
-                            &sd_fatfs_root_dir,
+                            &mut fat_volume,
+                            &fat_root_dir,
                             file_name,
                             embedded_sdmmc::Mode::ReadOnly,
                         )
                         .unwrap();
 
-                    let sample_length = sample_on_sd_card.length();
+                    let file_length_in_bytes = file.length() as usize;
+                    file_length_in_samples = file_length_in_bytes / core::mem::size_of::<f32>();
                     info!(
-                        "Open file KICADI~1.WAV!, length: {} MB",
-                        (sample_length / 1048576) as f32
+                        "Open file KICADI~1.WAV!, length: {} MB, {} bytes, {} samples",
+                        (file_length_in_bytes / 1048576) as f32,
+                        file_length_in_bytes,
+                        file_length_in_samples,
                     );
 
-                    // store wav file in flash
-                    sd_fatfs
-                        .read(
-                            &mut sd_fatfs_volume,
-                            &mut sample_on_sd_card,
-                            &mut integer_buffer,
-                        )
-                        .unwrap();
-                    sd_fatfs.close_dir(&sd_fatfs_volume, sd_fatfs_root_dir);
+                    // load wave file in chunks of CHUNK_SIZE samples into sdram
+
+                    const CHUNK_SIZE: usize = 24_000; // has to be a multiple of 4, bigger chunks mean faster loading times
+                    let chunk_iterator = file_length_in_bytes / CHUNK_SIZE;
+                    file.seek_from_start(2).unwrap(); // offset the reading of the chunks
+
+                    info!(
+                        "Loading in {} chunks of {} samples",
+                        chunk_iterator, CHUNK_SIZE
+                    );
+
+                    for i in 0..chunk_iterator {
+                        let mut chunk_buffer = [0u8; CHUNK_SIZE]; 
+
+                        sd_card
+                            .read(&fat_volume, &mut file, &mut chunk_buffer)
+                            .unwrap();
+
+                        for k in 0..CHUNK_SIZE {
+                            // converting every word consisting of four u8 into f32 in buffer
+                            if k % 4 == 0 {
+                                let f32_buffer = [
+                                    chunk_buffer[k],
+                                    chunk_buffer[k + 1],
+                                    chunk_buffer[k + 2],
+                                    chunk_buffer[k + 3],
+                                ];
+                                let iterator = i * (CHUNK_SIZE / 4) + k / 4;
+                                sdram[iterator] = f32::from_le_bytes(f32_buffer);
+                            }
+                        }
+
+                        match i {
+                            _ if i == 0 => info!("0%"),
+                            _ if i == (chunk_iterator / 10) => info!("10%"),
+                            _ if i == (chunk_iterator / 4) => info!("25%"),
+                            _ if i == (chunk_iterator / 2) => info!("50%"),
+                            _ if i == ((3 * chunk_iterator) / 4) => info!("75%"),
+                            _ if i == chunk_iterator - 1 => info!("100%"),
+                            _ => (),
+                        }
+                    }
+
+                    info!("All chunks loaded!");
+
+                    sd_card.close_dir(&fat_volume, fat_root_dir);
                 } else {
                     info!("Failed to get root dir");
+                    core::panic!();
                 }
             } else {
                 info!("Failed to get volume 0");
+                core::panic!();
             }
         } else {
-            info!("Failed to init SD Card");
+            error!("Failed to init SD Card");
+            core::panic!();
         }
 
-        let buffer = [(0.0, 0.0); audio::BLOCK_SIZE_MAX];               // audio ring buffer
-        let mut sample_buffer = [0.0; BUFFER_COUNT];                           // f32 sample buffer
+        let buffer = [(0.0, 0.0); audio::BLOCK_SIZE_MAX]; // audio ring buffer
+        let playhead = 457; // skip wav header information poorly
 
-        // convert u8 sample buffer into f32
-        let range = sample_buffer.iter().skip(1).step_by(2).count();
-        for n in 0..range {
-            sample_buffer[n] =
-                ((u32::from_be_bytes([0, 0, integer_buffer[2 * n], integer_buffer[2 * n + 1]])
-                    as i32
-                    - 32768) as f32)
-                    / 65536.0;
-        }
-        let counter = 0;
+        // // for debugging purposes
 
-        info!(
-            "Output WAV file sample from position 2000 to 2050 to check, if any audio is present: {:?}",
-            &integer_buffer[2_000..2_050]
-        );
+        // info!("SDRAM contents!");
+
+        // let offset: usize = 457;
+        // let range: usize = 20;
+        // let end = offset + range;
+
+        // for n in offset..end {
+        //     let chunk_buffer = sdram[n].to_le_bytes();
+        //     info!(
+        //         "Offset {}: {:#04x}, {:#04x}, {:#04x}, {:#04x}, {:?}",
+        //         n, chunk_buffer[0], chunk_buffer[1], chunk_buffer[2], chunk_buffer[3], sdram[n]
+        //     );
+        // }
 
         info!("Startup done!");
 
         (
-            Shared { counter },
+            Shared {},
             Local {
                 audio: system.audio,
                 buffer,
-                sample_buffer,
+                sdram,
+                playhead,
+                file_length_in_samples,
             },
             init::Monotonics(),
         )
@@ -170,30 +214,25 @@ mod app {
     }
 
     // Interrupt handler for audio
-    #[task(binds = DMA1_STR1, local = [audio, buffer, sample_buffer], shared = [counter], priority = 8)]
-    fn audio_handler(mut ctx: audio_handler::Context) {
+    #[task(binds = DMA1_STR1, local = [audio, buffer, playhead, sdram, file_length_in_samples, index: usize = 0], priority = 8)]
+    fn audio_handler(ctx: audio_handler::Context) {
         let audio = ctx.local.audio;
+        let mut buffer = *ctx.local.buffer;
+        let sdram: &mut [f32] = *ctx.local.sdram;
+        let mut index = *ctx.local.index + *ctx.local.playhead;
 
-        let buffer = ctx.local.buffer;
+        audio.get_stereo(&mut buffer);
+        for (_left, _right) in buffer {
+            let mono = sdram[index] * 0.5;
+            audio.push_stereo((mono, mono)).unwrap();
+            index += 1;
+        }
 
-        let sample_buffer = ctx.local.sample_buffer;
-
-        ctx.shared.counter.lock(|counter| {
-            if audio.get_stereo(buffer) {
-                for (_left, _right) in buffer {
-                    audio
-                        .push_stereo((sample_buffer[*counter], sample_buffer[*counter]))
-                        .unwrap();
-
-                    *counter += 1;
-                }
-            } else {
-                info!("Error reading data!");
-            }
-
-            if *counter > 3_000 {
-                *counter = 0;
-            }
-        });
+        if *ctx.local.playhead < *ctx.local.file_length_in_samples {
+            *ctx.local.playhead += audio::BLOCK_SIZE_MAX;
+        } else {
+            info!("Now playing again from start");
+            *ctx.local.playhead = 457;
+        }
     }
 }
