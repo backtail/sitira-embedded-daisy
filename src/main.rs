@@ -15,7 +15,9 @@ mod app {
         system::{self, System},
     };
 
-    use stm32h7xx_hal::pac;
+    use hal::digital::v2::PinState;
+    use stm32h7xx_hal::{hal, pac};
+
     #[shared]
     struct Shared {}
 
@@ -58,18 +60,20 @@ mod app {
 
         // setting up SD card connection
         let sdmmc_d = unsafe { pac::Peripherals::steal().SDMMC1 };
-        let gpios = system.gpio;
         let mut sd = sdmmc::init(
-            gpios.daisy1.unwrap(),
-            gpios.daisy2.unwrap(),
-            gpios.daisy3.unwrap(),
-            gpios.daisy4.unwrap(),
-            gpios.daisy5.unwrap(),
-            gpios.daisy6.unwrap(),
+            system.gpio.daisy1.unwrap(),
+            system.gpio.daisy2.unwrap(),
+            system.gpio.daisy3.unwrap(),
+            system.gpio.daisy4.unwrap(),
+            system.gpio.daisy5.unwrap(),
+            system.gpio.daisy6.unwrap(),
             sdmmc_d,
             ccdr.peripheral.SDMMC1,
             &mut ccdr.clocks,
         );
+
+        // configure LED
+        let mut led = system.gpio.led;
 
         // check sdram
         let sdram = system.sdram;
@@ -86,6 +90,8 @@ mod app {
 
         let file_name = "KICADI~1.WAV";
         let mut file_length_in_samples = 0;
+
+        led.set_state(PinState::High).unwrap();
 
         // initiate SD card connection
         if let Ok(_) = sd.init_card(50.mhz()) {
@@ -123,7 +129,7 @@ mod app {
                     );
 
                     for i in 0..chunk_iterator {
-                        let mut chunk_buffer = [0u8; CHUNK_SIZE]; 
+                        let mut chunk_buffer = [0u8; CHUNK_SIZE];
 
                         sd_card
                             .read(&fat_volume, &mut file, &mut chunk_buffer)
@@ -169,6 +175,8 @@ mod app {
             error!("Failed to init SD Card");
             core::panic!();
         }
+
+        led.set_state(PinState::Low).unwrap();
 
         let buffer = [(0.0, 0.0); audio::BLOCK_SIZE_MAX]; // audio ring buffer
         let playhead = 457; // skip wav header information poorly
