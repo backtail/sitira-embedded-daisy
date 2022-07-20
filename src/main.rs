@@ -9,17 +9,23 @@ mod app {
 
     use embedded_sdmmc::{Controller, TimeSource, Timestamp, VolumeIdx};
     use libdaisy::{
-        audio, logger,
+        audio,
+        gpio::*,
+        hid, logger,
         prelude::*,
         sdmmc,
         system::{self, System},
     };
 
     use hal::digital::v2::PinState;
+    use stm32h7xx_hal::adc;
+    use stm32h7xx_hal::stm32;
+    use stm32h7xx_hal::timer::Timer;
     use stm32h7xx_hal::{hal, pac};
-
     #[shared]
-    struct Shared {}
+    struct Shared {
+        adc1_value: f32,
+    }
 
     #[local]
     struct Local {
@@ -28,6 +34,9 @@ mod app {
         sdram: &'static mut [f32],
         playhead: usize,
         file_length_in_samples: usize,
+        adc1: adc::Adc<stm32::ADC1, adc::Enabled>,
+        control1: hid::AnalogControl<Daisy15<Analog>>,
+        timer2: Timer<stm32::TIM2>,
     }
 
     struct FakeTime;
@@ -50,7 +59,7 @@ mod app {
         logger::init();
 
         // initiate system
-        let system = system::System::init(ctx.core, ctx.device);
+        let mut system = system::System::init(ctx.core, ctx.device);
 
         // setting up core
         let rcc_p = unsafe { pac::Peripherals::steal().RCC };
@@ -89,7 +98,7 @@ mod app {
         );
 
         let file_name = "KICADI~1.WAV";
-        let mut file_length_in_samples = 0;
+        let file_length_in_samples;
 
         led.set_state(PinState::High).unwrap();
 
@@ -178,6 +187,25 @@ mod app {
 
         led.set_state(PinState::Low).unwrap();
 
+        // setting up ADC1 and TIM2
+
+        system.timer2.set_freq(20.ms());
+
+        let mut adc1 = system.adc1.enable();
+        adc1.set_resolution(adc::Resolution::SIXTEENBIT);
+        let adc_max = adc1.max_sample() as f32;
+
+        let adc1_input4 = system
+            .gpio
+            .daisy15
+            .take()
+            .expect("Failed to get pin 22 of the daisy!")
+            .into_analog();
+
+        let adc1_value = 0.0_f32;
+
+        let control1 = hid::AnalogControl::new(adc1_input4, adc_max);
+
         let buffer = [(0.0, 0.0); audio::BLOCK_SIZE_MAX]; // audio ring buffer
         let playhead = 457; // skip wav header information poorly
 
@@ -200,13 +228,16 @@ mod app {
         info!("Startup done!");
 
         (
-            Shared {},
+            Shared { adc1_value },
             Local {
                 audio: system.audio,
                 buffer,
                 sdram,
                 playhead,
                 file_length_in_samples,
+                adc1,
+                control1,
+                timer2: system.timer2,
             },
             init::Monotonics(),
         )
@@ -222,16 +253,18 @@ mod app {
     }
 
     // Interrupt handler for audio
-    #[task(binds = DMA1_STR1, local = [audio, buffer, playhead, sdram, file_length_in_samples, index: usize = 0], priority = 8)]
-    fn audio_handler(ctx: audio_handler::Context) {
+    #[task(binds = DMA1_STR1, local = [audio, buffer, playhead, sdram, file_length_in_samples, index: usize = 0], shared = [adc1_value], priority = 8)]
+    fn audio_handler(mut ctx: audio_handler::Context) {
         let audio = ctx.local.audio;
         let mut buffer = *ctx.local.buffer;
         let sdram: &mut [f32] = *ctx.local.sdram;
         let mut index = *ctx.local.index + *ctx.local.playhead;
+        let volume = ctx.shared.adc1_value.lock(|adc1_value| *adc1_value);
 
         audio.get_stereo(&mut buffer);
         for (_left, _right) in buffer {
-            let mono = sdram[index] * 0.5;
+            let mut mono = sdram[index]; // multiply with 0.7 for no distortion
+            mono = mono * volume; // multiply output with adc value of pot 1
             audio.push_stereo((mono, mono)).unwrap();
             index += 1;
         }
@@ -242,5 +275,23 @@ mod app {
             info!("Now playing again from start");
             *ctx.local.playhead = 457;
         }
+    }
+
+    // read values from pot 1 of daisy pod
+    #[task(binds = TIM2, local = [timer2, adc1, control1], shared = [adc1_value])]
+    fn interface_handler(mut ctx: interface_handler::Context) {
+        ctx.local.timer2.clear_irq();
+        let adc1 = ctx.local.adc1;
+        let control1 = ctx.local.control1;
+
+        if let Ok(data) = adc1.read(control1.get_pin()) {
+            control1.update(data);
+        }
+
+        let value = control1.get_value();
+
+        ctx.shared.adc1_value.lock(|adc1_value| {
+            *adc1_value = value;
+        });
     }
 }
