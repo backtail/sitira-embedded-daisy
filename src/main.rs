@@ -12,7 +12,7 @@ mod app {
         audio,
         gpio::*,
         hid, logger,
-        prelude::*,
+        prelude::{Analog, *},
         sdmmc,
         system::{self, System},
     };
@@ -24,7 +24,7 @@ mod app {
     use stm32h7xx_hal::{hal, pac};
     #[shared]
     struct Shared {
-        adc1_value: f32,
+        pot2_value: f32,
     }
 
     #[local]
@@ -35,8 +35,10 @@ mod app {
         playhead: usize,
         file_length_in_samples: usize,
         adc1: adc::Adc<stm32::ADC1, adc::Enabled>,
-        control1: hid::AnalogControl<Daisy15<Analog>>,
+        control2: hid::AnalogControl<Daisy15<Analog>>,
         timer2: Timer<stm32::TIM2>,
+        led1: Daisy24<Output<PushPull>>,
+        switch2: hid::Switch<Daisy28<Input<PullUp>>>,
     }
 
     struct FakeTime;
@@ -81,8 +83,8 @@ mod app {
             &mut ccdr.clocks,
         );
 
-        // configure LED
-        let mut led = system.gpio.led;
+        // configure daisy seed user led
+        let mut seed_user_led = system.gpio.seed_user_led;
 
         // check sdram
         let sdram = system.sdram;
@@ -100,7 +102,7 @@ mod app {
         let file_name = "KICADI~1.WAV";
         let file_length_in_samples;
 
-        led.set_state(PinState::High).unwrap();
+        seed_user_led.set_high().unwrap(); // set daisy seed led to high, while wave file is being loaded
 
         // initiate SD card connection
         if let Ok(_) = sd.init_card(50.mhz()) {
@@ -185,50 +187,53 @@ mod app {
             core::panic!();
         }
 
-        led.set_state(PinState::Low).unwrap();
+        seed_user_led.set_low().unwrap(); // set daisy seed seed_user_led to low when wave file is finished loading
 
         // setting up ADC1 and TIM2
 
-        system.timer2.set_freq(20.ms());
+        system.timer2.set_freq(4.ms());
 
         let mut adc1 = system.adc1.enable();
         adc1.set_resolution(adc::Resolution::SIXTEENBIT);
-        let adc_max = adc1.max_sample() as f32;
+        let adc1_max_value = adc1.max_sample() as f32;
 
-        let adc1_input4 = system
+        let pot2_pin = system
             .gpio
             .daisy15
             .take()
-            .expect("Failed to get pin 22 of the daisy!")
+            .expect("Failed to get pin 15 of the daisy!")
             .into_analog();
 
-        let adc1_value = 0.0_f32;
+        let pot2_value = 0.0_f32;
 
-        let control1 = hid::AnalogControl::new(adc1_input4, adc_max);
+        let control2 = hid::AnalogControl::new(pot2_pin, adc1_max_value);
+
+        // setting up button input
+
+        let switch2_pin = system
+            .gpio
+            .daisy28
+            .take()
+            .expect("Failed to get pin 28 of the daisy!")
+            .into_pull_up_input();
+        let switch2 = hid::Switch::new(switch2_pin, hid::SwitchType::PullUp);
+        
+        let led1 = system
+            .gpio
+            .daisy24
+            .take()
+            .expect("Failed to get pin 24 of the daisy!")
+            .into_push_pull_output();
+
+        // audio stuff
 
         let buffer = [(0.0, 0.0); audio::BLOCK_SIZE_MAX]; // audio ring buffer
         let playhead = 457; // skip wav header information poorly
 
-        // // for debugging purposes
-
-        // info!("SDRAM contents!");
-
-        // let offset: usize = 457;
-        // let range: usize = 20;
-        // let end = offset + range;
-
-        // for n in offset..end {
-        //     let chunk_buffer = sdram[n].to_le_bytes();
-        //     info!(
-        //         "Offset {}: {:#04x}, {:#04x}, {:#04x}, {:#04x}, {:?}",
-        //         n, chunk_buffer[0], chunk_buffer[1], chunk_buffer[2], chunk_buffer[3], sdram[n]
-        //     );
-        // }
-
         info!("Startup done!");
 
         (
-            Shared { adc1_value },
+            Shared { pot2_value },
             Local {
                 audio: system.audio,
                 buffer,
@@ -236,8 +241,10 @@ mod app {
                 playhead,
                 file_length_in_samples,
                 adc1,
-                control1,
+                control2,
                 timer2: system.timer2,
+                led1,
+                switch2,
             },
             init::Monotonics(),
         )
@@ -253,13 +260,13 @@ mod app {
     }
 
     // Interrupt handler for audio
-    #[task(binds = DMA1_STR1, local = [audio, buffer, playhead, sdram, file_length_in_samples, index: usize = 0], shared = [adc1_value], priority = 8)]
+    #[task(binds = DMA1_STR1, local = [audio, buffer, playhead, sdram, file_length_in_samples, index: usize = 0], shared = [pot2_value], priority = 8)]
     fn audio_handler(mut ctx: audio_handler::Context) {
         let audio = ctx.local.audio;
         let mut buffer = *ctx.local.buffer;
         let sdram: &mut [f32] = *ctx.local.sdram;
         let mut index = *ctx.local.index + *ctx.local.playhead;
-        let volume = ctx.shared.adc1_value.lock(|adc1_value| *adc1_value);
+        let volume = ctx.shared.pot2_value.lock(|pot2_value| *pot2_value);
 
         audio.get_stereo(&mut buffer);
         for (_left, _right) in buffer {
@@ -273,25 +280,38 @@ mod app {
             *ctx.local.playhead += audio::BLOCK_SIZE_MAX;
         } else {
             info!("Now playing again from start");
-            *ctx.local.playhead = 457;
+            *ctx.local.playhead = 457; // very cheap method of skipping the wav file header
         }
     }
 
-    // read values from pot 1 of daisy pod
-    #[task(binds = TIM2, local = [timer2, adc1, control1], shared = [adc1_value])]
+    // read values from pot 2 and switch 2 of daisy pod
+    #[task(binds = TIM2, local = [timer2, adc1, control2, switch2, led1], shared = [pot2_value])]
     fn interface_handler(mut ctx: interface_handler::Context) {
         ctx.local.timer2.clear_irq();
         let adc1 = ctx.local.adc1;
-        let control1 = ctx.local.control1;
+        let control2 = ctx.local.control2;
 
-        if let Ok(data) = adc1.read(control1.get_pin()) {
-            control1.update(data);
+        if let Ok(data) = adc1.read(control2.get_pin()) {
+            control2.update(data);
         }
 
-        let value = control1.get_value();
+        let value = control2.get_value();
 
-        ctx.shared.adc1_value.lock(|adc1_value| {
-            *adc1_value = value;
+        ctx.shared.pot2_value.lock(|pot2_value| {
+            *pot2_value = value;
         });
+
+        let switch2 = ctx.local.switch2;
+        switch2.update();
+
+        // switches are configured as active low
+        if switch2.is_low() {
+            ctx.local.led1.set_high().unwrap();
+        }
+
+        if switch2.is_high() {
+            ctx.local.led1.set_low().unwrap();
+        }
+
     }
 }
