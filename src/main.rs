@@ -24,13 +24,18 @@ mod app {
     use stm32h7xx_hal::stm32;
     use stm32h7xx_hal::timer::Timer;
 
+    use micromath::F32Ext;
+
     use crate::encoder;
+
+    use biquad::*;
 
     // use encoder;
     #[shared]
     struct Shared {
-        pot2_value: f32,
+        _pot2_value: f32,
         encoder_value: i32,
+        biquad: DirectForm1<f32>,
     }
 
     #[local]
@@ -116,7 +121,7 @@ mod app {
         seed_user_led.set_high().unwrap(); // set daisy seed led to high, while wave file is being loaded
 
         // initiate SD card connection
-        if let Ok(_) = sd.init_card(50.mhz()) {
+        if let Ok(_) = sd.init_card(stm32h7xx_hal::time::U32Ext::mhz(50)) {
             info!("Got SD Card!");
             let mut sd_card = Controller::new(sd.sdmmc_block_device(), FakeTime);
             if let Ok(mut fat_volume) = sd_card.get_volume(VolumeIdx(0)) {
@@ -215,9 +220,10 @@ mod app {
             .expect("Failed to get pin 15 of the daisy!")
             .into_analog();
 
-        let pot2_value = 0.0_f32;
+        let _pot2_value = 0.0_f32;
 
-        let control2 = hid::AnalogControl::new(pot2_pin, adc1_max_value);
+        let mut control2 = hid::AnalogControl::new(pot2_pin, adc1_max_value);
+        control2.set_transform(|x| (x + 1.0).log10() * 2_f32.log10());
 
         // setting up button input
 
@@ -264,6 +270,16 @@ mod app {
 
         let encoder_value = 0;
 
+        // setting up biquad filter
+
+        let f0 = biquad::ToHertz::hz(100.0);
+        let fs = biquad::ToHertz::khz(48.0);
+
+        let coeffs =
+            Coefficients::<f32>::from_params(Type::LowPass, fs, f0, Q_BUTTERWORTH_F32).unwrap();
+
+        let biquad = DirectForm1::<f32>::new(coeffs);
+
         // audio stuff
 
         let buffer = [(0.0, 0.0); audio::BLOCK_SIZE_MAX]; // audio ring buffer
@@ -273,8 +289,9 @@ mod app {
 
         (
             Shared {
-                pot2_value,
+                _pot2_value,
                 encoder_value,
+                biquad,
             },
             Local {
                 audio: system.audio,
@@ -303,18 +320,20 @@ mod app {
     }
 
     // Interrupt handler for audio
-    #[task(binds = DMA1_STR1, local = [audio, buffer, playhead, sdram, file_length_in_samples, index: usize = 0], shared = [pot2_value], priority = 8)]
-    fn audio_handler(mut ctx: audio_handler::Context) {
+    #[task(binds = DMA1_STR1, local = [audio, buffer, playhead, sdram, file_length_in_samples, index: usize = 0], shared = [biquad], priority = 8)]
+    fn audio_handler(ctx: audio_handler::Context) {
         let audio = ctx.local.audio;
         let mut buffer = *ctx.local.buffer;
         let sdram: &mut [f32] = *ctx.local.sdram;
         let mut index = *ctx.local.index + *ctx.local.playhead;
-        let volume = ctx.shared.pot2_value.lock(|pot2_value| *pot2_value);
+        let mut biquad = ctx.shared.biquad;
 
         audio.get_stereo(&mut buffer);
         for (_left, _right) in buffer {
-            let mut mono = sdram[index]; // multiply with 0.7 for no distortion
-            mono = mono * volume; // multiply output with adc value of pot 1
+            let mut mono = sdram[index] * 0.7; // multiply with 0.7 for no distortion
+            biquad.lock(|biquad| {
+                mono = biquad.run(mono);
+            });
             audio.push_stereo((mono, mono)).unwrap();
             index += 1;
         }
@@ -328,7 +347,7 @@ mod app {
     }
 
     // read values from pot 2 and switch 2 of daisy pod
-    #[task(binds = TIM2, local = [timer2, adc1, control2, switch2, led1, encoder], shared = [pot2_value, encoder_value])]
+    #[task(binds = TIM2, local = [timer2, adc1, control2, switch2, led1, encoder], shared = [encoder_value, biquad])]
     fn interface_handler(mut ctx: interface_handler::Context) {
         ctx.local.timer2.clear_irq();
         let adc1 = ctx.local.adc1;
@@ -338,10 +357,20 @@ mod app {
             control2.update(data);
         }
 
-        let value = control2.get_value();
+        let mut value = control2.get_value();
 
-        ctx.shared.pot2_value.lock(|pot2_value| {
-            *pot2_value = value;
+        value = value * 20_000.0 + 20.0;
+
+        ctx.shared.biquad.lock(|biquad| {
+            biquad.replace_coefficients(
+                Coefficients::<f32>::from_params(
+                    Type::LowPass,
+                    biquad::ToHertz::khz(48.0),
+                    biquad::ToHertz::hz(value),
+                    Q_BUTTERWORTH_F32,
+                )
+                .unwrap(),
+            );
         });
 
         let switch2 = ctx.local.switch2;
@@ -364,6 +393,6 @@ mod app {
                 info!("Current encoder position: {}", encoder.current_value);
                 *encoder_value = encoder.current_value;
             }
-        }); 
+        });
     }
 }
