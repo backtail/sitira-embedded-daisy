@@ -1,5 +1,7 @@
 #![no_main]
 #![no_std]
+
+pub mod encoder;
 #[rtic::app(
     device = stm32h7xx_hal::stm32,
     peripherals = true,
@@ -17,14 +19,18 @@ mod app {
         system::{self, System},
     };
 
-    use hal::digital::v2::PinState;
     use stm32h7xx_hal::adc;
+    use stm32h7xx_hal::pac;
     use stm32h7xx_hal::stm32;
     use stm32h7xx_hal::timer::Timer;
-    use stm32h7xx_hal::{hal, pac};
+
+    use crate::encoder;
+
+    // use encoder;
     #[shared]
     struct Shared {
         pot2_value: f32,
+        encoder_value: i32,
     }
 
     #[local]
@@ -39,6 +45,11 @@ mod app {
         timer2: Timer<stm32::TIM2>,
         led1: Daisy24<Output<PushPull>>,
         switch2: hid::Switch<Daisy28<Input<PullUp>>>,
+        encoder: encoder::RotaryEncoder<
+            Daisy14<Input<PullUp>>,
+            Daisy25<Input<PullUp>>,
+            Daisy26<Input<PullUp>>,
+        >,
     }
 
     struct FakeTime;
@@ -84,7 +95,7 @@ mod app {
         );
 
         // configure daisy seed user led
-        let mut seed_user_led = system.gpio.seed_user_led;
+        let mut seed_user_led = system.gpio.led;
 
         // check sdram
         let sdram = system.sdram;
@@ -191,7 +202,7 @@ mod app {
 
         // setting up ADC1 and TIM2
 
-        system.timer2.set_freq(4.ms());
+        system.timer2.set_freq(1.ms());
 
         let mut adc1 = system.adc1.enable();
         adc1.set_resolution(adc::Resolution::SIXTEENBIT);
@@ -217,13 +228,41 @@ mod app {
             .expect("Failed to get pin 28 of the daisy!")
             .into_pull_up_input();
         let switch2 = hid::Switch::new(switch2_pin, hid::SwitchType::PullUp);
-        
+
         let led1 = system
             .gpio
             .daisy24
             .take()
             .expect("Failed to get pin 24 of the daisy!")
             .into_push_pull_output();
+
+        // setting up rotary encoder
+
+        let rotary_switch_pin = system
+            .gpio
+            .daisy14
+            .take()
+            .expect("Failed to get pin 14 of the daisy!")
+            .into_pull_up_input();
+
+        let rotary_clock_pin = system
+            .gpio
+            .daisy25
+            .take()
+            .expect("Failed to get pin 25 of the daisy!")
+            .into_pull_up_input();
+
+        let rotary_data_pin = system
+            .gpio
+            .daisy26
+            .take()
+            .expect("Failed to get pin 26 of the daisy!")
+            .into_pull_up_input();
+
+        let encoder =
+            encoder::RotaryEncoder::new(rotary_switch_pin, rotary_clock_pin, rotary_data_pin);
+
+        let encoder_value = 0;
 
         // audio stuff
 
@@ -233,7 +272,10 @@ mod app {
         info!("Startup done!");
 
         (
-            Shared { pot2_value },
+            Shared {
+                pot2_value,
+                encoder_value,
+            },
             Local {
                 audio: system.audio,
                 buffer,
@@ -245,6 +287,7 @@ mod app {
                 timer2: system.timer2,
                 led1,
                 switch2,
+                encoder,
             },
             init::Monotonics(),
         )
@@ -285,7 +328,7 @@ mod app {
     }
 
     // read values from pot 2 and switch 2 of daisy pod
-    #[task(binds = TIM2, local = [timer2, adc1, control2, switch2, led1], shared = [pot2_value])]
+    #[task(binds = TIM2, local = [timer2, adc1, control2, switch2, led1, encoder], shared = [pot2_value, encoder_value])]
     fn interface_handler(mut ctx: interface_handler::Context) {
         ctx.local.timer2.clear_irq();
         let adc1 = ctx.local.adc1;
@@ -313,5 +356,14 @@ mod app {
             ctx.local.led1.set_low().unwrap();
         }
 
+        let encoder = ctx.local.encoder;
+        encoder.update();
+
+        ctx.shared.encoder_value.lock(|encoder_value| {
+            if encoder.current_value != *encoder_value {
+                info!("Current encoder position: {}", encoder.current_value);
+                *encoder_value = encoder.current_value;
+            }
+        }); 
     }
 }
