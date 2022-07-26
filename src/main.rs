@@ -18,17 +18,30 @@ mod app {
         sdmmc,
         system::{self, System},
     };
-
-    use stm32h7xx_hal::adc;
     use stm32h7xx_hal::pac;
-    use stm32h7xx_hal::stm32;
+    use stm32h7xx_hal::time::U32Ext;
     use stm32h7xx_hal::timer::Timer;
+    use stm32h7xx_hal::{
+        adc,
+        spi::{Mode, NoMiso},
+        stm32,
+    };
+
+    use embedded_graphics::{
+        mono_font::{ascii::FONT_6X10, MonoTextStyle},
+        pixelcolor::Rgb565,
+        prelude::*,
+        primitives::{PrimitiveStyleBuilder, Rectangle},
+        text::{Alignment, Text},
+    };
 
     use micromath::F32Ext;
 
     use crate::encoder;
 
     use biquad::*;
+
+    // use embedded_graphics;
 
     // use encoder;
     #[shared]
@@ -115,13 +128,112 @@ mod app {
             sdram_size_bytes, sdram_size, sdram_address
         );
 
+        // graphics
+
+        // setting up SPI1 for ILI9431 driver
+
+        let mut lcd_nss = system
+            .gpio
+            .daisy7
+            .expect("Failed to get pin 7 of the daisy!")
+            .into_push_pull_output();
+
+        lcd_nss.set_high().unwrap();
+
+        let lcd_clk = system
+            .gpio
+            .daisy8
+            .expect("Failed to get pin 8 of the daisy!")
+            .into_alternate_af5();
+
+        let lcd_miso = NoMiso {};
+
+        let lcd_mosi = system
+            .gpio
+            .daisy10
+            .expect("Failed to get pin 10 of the daisy!")
+            .into_alternate_af5()
+            .internal_pull_up(true);
+
+        let lcd_dc = system
+            .gpio
+            .daisy11
+            .expect("Failed to get pin 11 of the daisy!")
+            .into_push_pull_output();
+        let lcd_cs = system
+            .gpio
+            .daisy12
+            .expect("Failed to get pin 12 of the daisy!")
+            .into_push_pull_output();
+
+        let lcd_reset = system
+            .gpio
+            .daisy17
+            .expect("Failed to get pin 17 of the daisy!")
+            .into_push_pull_output();
+
+        let mode = Mode {
+            polarity: stm32h7xx_hal::spi::Polarity::IdleLow,
+            phase: stm32h7xx_hal::spi::Phase::CaptureOnFirstTransition,
+        };
+
+        let lcd_spi = unsafe { pac::Peripherals::steal().SPI1 }.spi(
+            (lcd_clk, lcd_miso, lcd_mosi),
+            mode,
+            U32Ext::mhz(25),
+            ccdr.peripheral.SPI1,
+            &ccdr.clocks,
+        );
+
+        let timer3 = unsafe { pac::Peripherals::steal().TIM3 }.timer(
+            1.ms(),
+            ccdr.peripheral.TIM3,
+            &ccdr.clocks,
+        );
+        let mut delay = stm32h7xx_hal::delay::DelayFromCountDownTimer::new(timer3);
+
+        let spi_interface = display_interface_spi::SPIInterface::new(lcd_spi, lcd_dc, lcd_cs);
+
+        let mut lcd = ili9341::Ili9341::new(
+            spi_interface,
+            lcd_reset,
+            &mut delay,
+            ili9341::Orientation::Landscape,
+            ili9341::DisplaySize240x320,
+        )
+        .unwrap();
+
+        lcd.clear(Rgb565::WHITE).unwrap();
+
+        let style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
+
+        Text::with_alignment(
+            "Lorem ipsum dolor sit amet, consetetur sadipscing\nelitr, sed diam nonumy eirmod tempor invidunt ut\nlabore et dolore magna aliquyam erat, sed diam\nvoluptua. At vero eos et accusam et justo duo\ndolores et ea rebum. Stet clita kasd gubergren, no\nsea takimata sanctus est Lorem ipsum dolor sit amet.",
+            Point::new(6, 10),
+            style,
+            Alignment::Left,
+        )
+        .draw(&mut lcd)
+        .unwrap();
+
+        let style = PrimitiveStyleBuilder::new()
+            .stroke_color(Rgb565::RED)
+            .stroke_width(3)
+            .fill_color(Rgb565::GREEN)
+            .build();
+
+        Rectangle::new(Point::new(120 - 20, 160 - 20), Size::new(40, 40))
+            .into_styled(style)
+            .draw(&mut lcd)
+            .unwrap();
+
         let file_name = "KICADI~1.WAV";
         let file_length_in_samples;
 
         seed_user_led.set_high().unwrap(); // set daisy seed led to high, while wave file is being loaded
 
         // initiate SD card connection
-        if let Ok(_) = sd.init_card(stm32h7xx_hal::time::U32Ext::mhz(50)) {
+        if let Ok(_) = sd.init_card(U32Ext::mhz(50)) {
             info!("Got SD Card!");
             let mut sd_card = Controller::new(sd.sdmmc_block_device(), FakeTime);
             if let Ok(mut fat_volume) = sd_card.get_volume(VolumeIdx(0)) {
