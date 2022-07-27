@@ -3,6 +3,7 @@
 
 pub mod encoder;
 pub mod lcd;
+
 #[rtic::app(
     device = stm32h7xx_hal::stm32,
     peripherals = true,
@@ -103,18 +104,9 @@ mod app {
             &mut ccdr.clocks,
         );
 
-        // check sdram
+        // fill sdram with zeroes
         let sdram = system.sdram;
         sdram.fill(0.0);
-
-        let sdram_size_bytes = libdaisy::sdram::Sdram::bytes();
-        let sdram_size = sdram_size_bytes / core::mem::size_of::<f32>();
-        let sdram_address = core::ptr::addr_of!(sdram[0]);
-
-        info!(
-            "SDRAM size: {} bytes, {} words starting at {:?}",
-            sdram_size_bytes, sdram_size, sdram_address
-        );
 
         // graphics
 
