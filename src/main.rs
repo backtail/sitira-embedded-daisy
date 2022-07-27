@@ -2,6 +2,7 @@
 #![no_std]
 
 pub mod encoder;
+pub mod lcd;
 #[rtic::app(
     device = stm32h7xx_hal::stm32,
     peripherals = true,
@@ -27,23 +28,13 @@ mod app {
         stm32,
     };
 
-    use embedded_graphics::{
-        mono_font::{ascii::FONT_6X10, MonoTextStyle},
-        pixelcolor::Rgb565,
-        prelude::*,
-        primitives::{PrimitiveStyleBuilder, Rectangle},
-        text::{Alignment, Text},
-    };
-
     use micromath::F32Ext;
 
     use crate::encoder;
+    use crate::lcd;
 
     use biquad::*;
 
-    // use embedded_graphics;
-
-    // use encoder;
     #[shared]
     struct Shared {
         _pot2_value: f32,
@@ -111,9 +102,6 @@ mod app {
             ccdr.peripheral.SDMMC1,
             &mut ccdr.clocks,
         );
-
-        // configure daisy seed user led
-        let mut seed_user_led = system.gpio.led;
 
         // check sdram
         let sdram = system.sdram;
@@ -190,47 +178,19 @@ mod app {
             ccdr.peripheral.TIM3,
             &ccdr.clocks,
         );
-        let mut delay = stm32h7xx_hal::delay::DelayFromCountDownTimer::new(timer3);
+        let delay = stm32h7xx_hal::delay::DelayFromCountDownTimer::new(timer3);
 
-        let spi_interface = display_interface_spi::SPIInterface::new(lcd_spi, lcd_dc, lcd_cs);
+        let mut lcd = lcd::Lcd::new(lcd_spi, lcd_dc, lcd_cs, lcd_reset, delay);
 
-        let mut lcd = ili9341::Ili9341::new(
-            spi_interface,
-            lcd_reset,
-            &mut delay,
-            ili9341::Orientation::Landscape,
-            ili9341::DisplaySize240x320,
-        )
-        .unwrap();
+        lcd.setup();
+        // for i in 0..100 {
+        //     lcd.draw_loading_bar(i, "Kicad-Intro.wav");
+        // }
 
-        lcd.clear(Rgb565::WHITE).unwrap();
-
-        let style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
-
-        Text::with_alignment(
-            "Lorem ipsum dolor sit amet, consetetur sadipscing\nelitr, sed diam nonumy eirmod tempor invidunt ut\nlabore et dolore magna aliquyam erat, sed diam\nvoluptua. At vero eos et accusam et justo duo\ndolores et ea rebum. Stet clita kasd gubergren, no\nsea takimata sanctus est Lorem ipsum dolor sit amet.",
-            Point::new(6, 10),
-            style,
-            Alignment::Left,
-        )
-        .draw(&mut lcd)
-        .unwrap();
-
-        let style = PrimitiveStyleBuilder::new()
-            .stroke_color(Rgb565::RED)
-            .stroke_width(3)
-            .fill_color(Rgb565::GREEN)
-            .build();
-
-        Rectangle::new(Point::new(120 - 20, 160 - 20), Size::new(40, 40))
-            .into_styled(style)
-            .draw(&mut lcd)
-            .unwrap();
+        // setting up SD Card and reading wav files
 
         let file_name = "KICADI~1.WAV";
         let file_length_in_samples;
-
-        seed_user_led.set_high().unwrap(); // set daisy seed led to high, while wave file is being loaded
 
         // initiate SD card connection
         if let Ok(_) = sd.init_card(U32Ext::mhz(50)) {
@@ -258,7 +218,9 @@ mod app {
 
                     // load wave file in chunks of CHUNK_SIZE samples into sdram
 
-                    const CHUNK_SIZE: usize = 24_000; // has to be a multiple of 4, bigger chunks mean faster loading times
+                    lcd.draw_loading_bar(0, file_name);
+
+                    const CHUNK_SIZE: usize = 48_000; // has to be a multiple of 4, bigger chunks mean faster loading times
                     let chunk_iterator = file_length_in_bytes / CHUNK_SIZE;
                     file.seek_from_start(2).unwrap(); // offset the reading of the chunks
 
@@ -288,15 +250,10 @@ mod app {
                             }
                         }
 
-                        match i {
-                            _ if i == 0 => info!("0%"),
-                            _ if i == (chunk_iterator / 10) => info!("10%"),
-                            _ if i == (chunk_iterator / 4) => info!("25%"),
-                            _ if i == (chunk_iterator / 2) => info!("50%"),
-                            _ if i == ((3 * chunk_iterator) / 4) => info!("75%"),
-                            _ if i == chunk_iterator - 1 => info!("100%"),
-                            _ => (),
-                        }
+                        lcd.draw_loading_bar(
+                            ((i as f32 / chunk_iterator as f32) * 100_f32) as u32,
+                            file_name,
+                        );
                     }
 
                     info!("All chunks loaded!");
@@ -314,8 +271,6 @@ mod app {
             error!("Failed to init SD Card");
             core::panic!();
         }
-
-        seed_user_led.set_low().unwrap(); // set daisy seed seed_user_led to low when wave file is finished loading
 
         // setting up ADC1 and TIM2
 
