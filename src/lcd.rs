@@ -12,6 +12,8 @@ use embedded_graphics::{
 
 pub struct Lcd<SPI, DC, CS, RESET> {
     driver: Ili9341<SPIInterface<SPI, DC, CS>, RESET>,
+    pub width: usize,
+    pub height: usize,
 }
 
 impl<SPI, DC, CS, RESET> Lcd<SPI, DC, CS, RESET>
@@ -36,7 +38,14 @@ where
         )
         .unwrap();
 
-        Self { driver }
+        let width = driver.width();
+        let height = driver.width();
+
+        Self {
+            driver,
+            width,
+            height,
+        }
     }
 
     pub fn setup(&mut self) {
@@ -103,5 +112,15 @@ where
             .draw(&mut self.driver)
             .unwrap();
         }
+    }
+
+    pub fn print_error_center(&mut self, x: usize, y: usize, message: &str) {
+        let character_style = MonoTextStyle::new(&ascii::FONT_6X9, Rgb565::WHITE);
+
+        let position = Point::new(x as i32, y as i32);
+
+        Text::with_alignment(message, position, character_style, Alignment::Center)
+            .draw(&mut self.driver)
+            .unwrap();
     }
 }
