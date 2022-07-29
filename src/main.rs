@@ -9,13 +9,11 @@ pub mod lcd;
     peripherals = true,
 )]
 mod app {
-    use log::{error, info};
-
     use embedded_sdmmc::{Controller, TimeSource, Timestamp, VolumeIdx};
     use libdaisy::{
         audio,
         gpio::*,
-        hid, logger,
+        hid,
         prelude::{Analog, *},
         sdmmc,
         system::{self, System},
@@ -79,8 +77,6 @@ mod app {
 
     #[init]
     fn init(ctx: init::Context) -> (Shared, Local, init::Monotonics) {
-        logger::init();
-
         // initiate system
         let mut system = system::System::init(ctx.core, ctx.device);
 
@@ -186,7 +182,6 @@ mod app {
 
         // initiate SD card connection
         if let Ok(_) = sd.init_card(U32Ext::mhz(50)) {
-            info!("Got SD Card!");
             let mut sd_card = Controller::new(sd.sdmmc_block_device(), FakeTime);
             if let Ok(mut fat_volume) = sd_card.get_volume(VolumeIdx(0)) {
                 if let Ok(fat_root_dir) = sd_card.open_root_dir(&fat_volume) {
@@ -201,12 +196,6 @@ mod app {
 
                     let file_length_in_bytes = file.length() as usize;
                     file_length_in_samples = file_length_in_bytes / core::mem::size_of::<f32>();
-                    info!(
-                        "Open file KICADI~1.WAV!, length: {} MB, {} bytes, {} samples",
-                        (file_length_in_bytes / 1048576) as f32,
-                        file_length_in_bytes,
-                        file_length_in_samples,
-                    );
 
                     // load wave file in chunks of CHUNK_SIZE samples into sdram
 
@@ -215,11 +204,6 @@ mod app {
                     const CHUNK_SIZE: usize = 48_000; // has to be a multiple of 4, bigger chunks mean faster loading times
                     let chunk_iterator = file_length_in_bytes / CHUNK_SIZE;
                     file.seek_from_start(2).unwrap(); // offset the reading of the chunks
-
-                    info!(
-                        "Loading in {} chunks of {} samples",
-                        chunk_iterator, CHUNK_SIZE
-                    );
 
                     for i in 0..chunk_iterator {
                         let mut chunk_buffer = [0u8; CHUNK_SIZE];
@@ -248,19 +232,17 @@ mod app {
                         );
                     }
 
-                    info!("All chunks loaded!");
-
                     sd_card.close_dir(&fat_volume, fat_root_dir);
                 } else {
-                    info!("Failed to get root dir");
+                    lcd.print_error_center(lcd.width / 2, 190, "Failed to get file!");
                     core::panic!();
                 }
             } else {
-                info!("Failed to get volume 0");
+                lcd.print_error_center(lcd.width / 2, 190, "Failed to get volume 0!");
                 core::panic!();
             }
         } else {
-            error!("Failed to init SD Card");
+            lcd.print_error_center(lcd.width / 2, 190, "No SD card found!");
             core::panic!();
         }
 
@@ -344,8 +326,6 @@ mod app {
         let buffer = [(0.0, 0.0); audio::BLOCK_SIZE_MAX]; // audio ring buffer
         let playhead = 457; // skip wav header information poorly
 
-        info!("Startup done!");
-
         (
             Shared {
                 _pot2_value,
@@ -400,7 +380,6 @@ mod app {
         if *ctx.local.playhead < *ctx.local.file_length_in_samples {
             *ctx.local.playhead += audio::BLOCK_SIZE_MAX;
         } else {
-            info!("Now playing again from start");
             *ctx.local.playhead = 457; // very cheap method of skipping the wav file header
         }
     }
@@ -449,7 +428,6 @@ mod app {
 
         ctx.shared.encoder_value.lock(|encoder_value| {
             if encoder.current_value != *encoder_value {
-                info!("Current encoder position: {}", encoder.current_value);
                 *encoder_value = encoder.current_value;
             }
         });
