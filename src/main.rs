@@ -2,6 +2,7 @@
 #![no_std]
 
 pub mod encoder;
+pub mod granular;
 pub mod lcd;
 pub mod sitira;
 
@@ -11,7 +12,7 @@ pub mod sitira;
 )]
 mod app {
 
-    use crate::{encoder, sitira};
+    use crate::{encoder, granular, sitira};
     use biquad::*;
     use libdaisy::{audio, gpio::*, hid, prelude::*};
     use stm32h7xx_hal::timer::Timer;
@@ -41,6 +42,7 @@ mod app {
             Daisy25<Input<PullUp>>,
             Daisy26<Input<PullUp>>,
         >,
+        grain: granular::Grain,
     }
 
     #[init]
@@ -66,6 +68,7 @@ mod app {
                 led1: s.led1,
                 switch2: s.switch2,
                 encoder: s.encoder,
+                grain: s.grain,
             },
             init::Monotonics(),
         )
@@ -81,17 +84,19 @@ mod app {
     }
 
     // Interrupt handler for audio
-    #[task(binds = DMA1_STR1, local = [audio, buffer, playhead, sdram, file_length_in_samples, index: usize = 0], shared = [biquad], priority = 8)]
+    #[task(binds = DMA1_STR1, local = [audio, buffer, playhead, sdram, file_length_in_samples, index: usize = 0, grain], shared = [biquad], priority = 8)]
     fn audio_handler(ctx: audio_handler::Context) {
         let audio = ctx.local.audio;
         let mut buffer = *ctx.local.buffer;
         let sdram: &mut [f32] = *ctx.local.sdram;
         let mut index = *ctx.local.index + *ctx.local.playhead;
         let mut biquad = ctx.shared.biquad;
+        let mut grain = *ctx.local.grain;
 
         audio.get_stereo(&mut buffer);
         for (_left, _right) in buffer {
             let mut mono = sdram[index] * 0.7; // multiply with 0.7 for no distortion
+            mono = grain.update_next(mono);
             biquad.lock(|biquad| {
                 mono = biquad.run(mono);
             });

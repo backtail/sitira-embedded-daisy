@@ -12,6 +12,7 @@ use biquad::*;
 use micromath::F32Ext;
 
 use crate::encoder;
+use crate::granular::{Grain, WindowFunction};
 use crate::lcd;
 
 struct FakeTime;
@@ -47,6 +48,7 @@ pub struct Sitira {
     >,
     pub encoder_value: i32,
     pub biquad: DirectForm1<f32>,
+    pub grain: Grain,
 }
 
 impl Sitira {
@@ -147,7 +149,7 @@ impl Sitira {
 
         // setting up SD Card and reading wav files
 
-        let file_name = "KICADI~1.WAV";
+        let file_name = "B.WAV";
         let file_length_in_samples;
 
         // initiate SD card connection
@@ -171,7 +173,7 @@ impl Sitira {
 
                     lcd.draw_loading_bar(0, file_name);
 
-                    const CHUNK_SIZE: usize = 48_000; // has to be a multiple of 4, bigger chunks mean faster loading times
+                    const CHUNK_SIZE: usize = 10_000; // has to be a multiple of 4, bigger chunks mean faster loading times
                     let chunk_iterator = file_length_in_bytes / CHUNK_SIZE;
                     file.seek_from_start(2).unwrap(); // offset the reading of the chunks
 
@@ -296,6 +298,8 @@ impl Sitira {
         let buffer = [(0.0, 0.0); audio::BLOCK_SIZE_MAX]; // audio ring buffer
         let playhead = 457; // skip wav header information poorly
 
+        let grain = Grain::new(2.0, 50.0, WindowFunction::Sine);
+
         Self {
             audio: system.audio,
             buffer,
@@ -310,6 +314,7 @@ impl Sitira {
             encoder,
             encoder_value,
             biquad,
+            grain,
         }
     }
 }
