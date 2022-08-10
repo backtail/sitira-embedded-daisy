@@ -9,10 +9,10 @@ use stm32h7xx_hal::timer::Timer;
 use stm32h7xx_hal::{adc, pac, stm32};
 
 use biquad::*;
-use micromath::F32Ext;
+// use micromath::F32Ext;
 
 use crate::encoder;
-use crate::granular::{Grain, WindowFunction};
+use crate::granular::{Grains, WindowFunction};
 use crate::lcd;
 
 struct FakeTime;
@@ -48,7 +48,7 @@ pub struct Sitira {
     >,
     pub encoder_value: i32,
     pub biquad: DirectForm1<f32>,
-    pub grain: Grain,
+    pub grains: Grains,
 }
 
 impl Sitira {
@@ -235,8 +235,8 @@ impl Sitira {
 
         let _pot2_value = 0.0_f32;
 
-        let mut control2 = hid::AnalogControl::new(pot2_pin, adc1_max_value);
-        control2.set_transform(|x| (x + 1.0).log10() * 2_f32.log10());
+        let control2 = hid::AnalogControl::new(pot2_pin, adc1_max_value);
+        // control2.set_transform(|x| (x + 1.0).log10() * 2_f32.log10());
 
         // setting up button input
 
@@ -285,7 +285,7 @@ impl Sitira {
 
         // setting up biquad filter
 
-        let f0 = biquad::ToHertz::hz(100.0);
+        let f0 = biquad::ToHertz::hz(15_000.0);
         let fs = biquad::ToHertz::khz(48.0);
 
         let coeffs =
@@ -298,7 +298,13 @@ impl Sitira {
         let buffer = [(0.0, 0.0); audio::BLOCK_SIZE_MAX]; // audio ring buffer
         let playhead = 457; // skip wav header information poorly
 
-        let grain = Grain::new(2.0, 50.0, WindowFunction::Sine);
+        let grains = Grains::new(
+            2,
+            40.0,
+            15.0,
+            file_length_in_samples as u32,
+            WindowFunction::Sine,
+        );
 
         Self {
             audio: system.audio,
@@ -314,7 +320,7 @@ impl Sitira {
             encoder,
             encoder_value,
             biquad,
-            grain,
+            grains,
         }
     }
 }

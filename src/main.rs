@@ -11,7 +11,6 @@ pub mod sitira;
     peripherals = true,
 )]
 mod app {
-
     use crate::{encoder, granular, sitira};
     use biquad::*;
     use libdaisy::{audio, gpio::*, hid, prelude::*};
@@ -20,7 +19,7 @@ mod app {
 
     #[shared]
     struct Shared {
-        _pot2_value: f32,
+        pot2_value: f32,
         encoder_value: i32,
         biquad: DirectForm1<f32>,
     }
@@ -42,7 +41,7 @@ mod app {
             Daisy25<Input<PullUp>>,
             Daisy26<Input<PullUp>>,
         >,
-        grain: granular::Grain,
+        grains: granular::Grains,
     }
 
     #[init]
@@ -52,7 +51,7 @@ mod app {
 
         (
             Shared {
-                _pot2_value: 0.0,
+                pot2_value: 0.0,
                 encoder_value: s.encoder_value,
                 biquad: s.biquad,
             },
@@ -68,7 +67,7 @@ mod app {
                 led1: s.led1,
                 switch2: s.switch2,
                 encoder: s.encoder,
-                grain: s.grain,
+                grains: s.grains,
             },
             init::Monotonics(),
         )
@@ -84,35 +83,39 @@ mod app {
     }
 
     // Interrupt handler for audio
-    #[task(binds = DMA1_STR1, local = [audio, buffer, playhead, sdram, file_length_in_samples, index: usize = 0, grain], shared = [biquad], priority = 8)]
+    #[task(binds = DMA1_STR1, local = [audio, buffer, playhead, sdram, grains], shared = [pot2_value, biquad], priority = 8)]
     fn audio_handler(ctx: audio_handler::Context) {
         let audio = ctx.local.audio;
         let mut buffer = *ctx.local.buffer;
         let sdram: &mut [f32] = *ctx.local.sdram;
-        let mut index = *ctx.local.index + *ctx.local.playhead;
-        let mut biquad = ctx.shared.biquad;
-        let mut grain = *ctx.local.grain;
+        let mut grains = *ctx.local.grains;
+        let mut pot2_value = ctx.shared.pot2_value;
+
+        pot2_value.lock(|pot2_value| {
+            grains.set_offset(*pot2_value as u32);
+            grains.start_window_funtion();
+        });
 
         audio.get_stereo(&mut buffer);
         for (_left, _right) in buffer {
-            let mut mono = sdram[index] * 0.7; // multiply with 0.7 for no distortion
-            mono = grain.update_next(mono);
-            biquad.lock(|biquad| {
-                mono = biquad.run(mono);
-            });
-            audio.push_stereo((mono, mono)).unwrap();
-            index += 1;
-        }
+            let mut mono_sum = 0.0_f32;
 
-        if *ctx.local.playhead < *ctx.local.file_length_in_samples {
-            *ctx.local.playhead += audio::BLOCK_SIZE_MAX;
-        } else {
-            *ctx.local.playhead = 457; // very cheap method of skipping the wav file header
+            for instance in 0..grains.active_grains {
+                let mut current_grain = grains.grains[instance];
+
+                if !current_grain.done_with_window_funtion {
+                    let position = current_grain.update_sample_position();
+                    mono_sum += current_grain.update_next_sample(sdram[position]);
+                }
+            }
+            mono_sum = mono_sum / grains.active_grains as f32;
+
+            audio.push_stereo((mono_sum, mono_sum)).unwrap();
         }
     }
 
     // read values from pot 2 and switch 2 of daisy pod
-    #[task(binds = TIM2, local = [timer2, adc1, control2, switch2, led1, encoder], shared = [biquad,encoder_value])]
+    #[task(binds = TIM2, local = [timer2, adc1, control2, switch2, led1, encoder, file_length_in_samples], shared = [encoder_value, pot2_value])]
     fn interface_handler(mut ctx: interface_handler::Context) {
         ctx.local.timer2.clear_irq();
         let adc1 = ctx.local.adc1;
@@ -122,20 +125,8 @@ mod app {
             control2.update(data);
         }
 
-        let mut value = control2.get_value();
-
-        value = value * 20_000.0 + 20.0;
-
-        ctx.shared.biquad.lock(|biquad| {
-            biquad.replace_coefficients(
-                Coefficients::<f32>::from_params(
-                    Type::LowPass,
-                    biquad::ToHertz::khz(48.0),
-                    biquad::ToHertz::hz(value),
-                    Q_BUTTERWORTH_F32,
-                )
-                .unwrap(),
-            );
+        ctx.shared.pot2_value.lock(|pot2_value| {
+            *pot2_value = control2.get_value() * (*ctx.local.file_length_in_samples) as f32
         });
 
         let switch2 = ctx.local.switch2;
