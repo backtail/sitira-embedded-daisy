@@ -88,7 +88,7 @@ mod app {
         let audio = ctx.local.audio;
         let mut buffer = *ctx.local.buffer;
         let sdram: &mut [f32] = *ctx.local.sdram;
-        let mut grains = *ctx.local.grains;
+        let grains = ctx.local.grains;
         let mut pot2_value = ctx.shared.pot2_value;
 
         pot2_value.lock(|pot2_value| {
