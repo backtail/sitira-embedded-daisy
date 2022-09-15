@@ -14,6 +14,7 @@ cortex-m-semihosting = "0.3.5"
 panic-halt = "0.2.0"
 panic-semihosting = { version = "0.5.6" }
 libdaisy = { path = "../libdaisy-rust", features = ["log-rtt"]}
+granulator = { path = "../granulator", features = ["no_std"]}
 rtt-target = { version = "0.3.0", features = ["cortex-m"], optional = true }
 embedded-sdmmc = "0.3.0"
 biquad = "0.4.2"

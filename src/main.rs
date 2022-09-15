@@ -48,6 +48,16 @@ mod app {
     fn init(ctx: init::Context) -> (Shared, Local, init::Monotonics) {
         // initiate system
         let s = sitira::Sitira::init(ctx.core, ctx.device);
+        let mut g = granulator::Granulator::new();
+
+        g.get_next_sample();
+        g.update_scheduler(core::time::Duration::from_millis(10));
+        g.set_active_grains(1);
+        let buffer = [0_f32; 64];
+        g.set_audio_buffer(&buffer[..]);
+        g.set_grain_size(100.0);
+        g.set_master_volume(0.5);
+        g.set_offset(1000);
 
         (
             Shared {
