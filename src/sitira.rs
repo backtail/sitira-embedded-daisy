@@ -8,12 +8,17 @@ use stm32h7xx_hal::time::U32Ext;
 use stm32h7xx_hal::timer::Timer;
 use stm32h7xx_hal::{adc, pac, stm32};
 
-use biquad::*;
-// use micromath::F32Ext;
-
 use crate::encoder;
-use crate::granular::{Grains, WindowFunction};
 use crate::lcd;
+
+pub type Adc1Control2 = hid::AnalogControl<Daisy15<Analog>>;
+
+pub type Led1 = Daisy24<Output<PushPull>>;
+
+pub type Switch2 = hid::Switch<Daisy28<Input<PullUp>>>;
+
+pub type Encoder =
+    encoder::RotaryEncoder<Daisy14<Input<PullUp>>, Daisy25<Input<PullUp>>, Daisy26<Input<PullUp>>>;
 
 struct FakeTime;
 
@@ -30,25 +35,30 @@ impl TimeSource for FakeTime {
     }
 }
 
-pub struct Sitira {
+pub struct AudioRate {
     pub audio: audio::Audio,
     pub buffer: audio::AudioBuffer,
+}
+
+pub struct ControlRate {
+    // Audio
     pub sdram: &'static mut [f32],
-    pub playhead: usize,
     pub file_length_in_samples: usize,
+
+    // HAL
     pub adc1: adc::Adc<stm32::ADC1, adc::Enabled>,
-    pub control2: hid::AnalogControl<Daisy15<Analog>>,
     pub timer2: Timer<stm32::TIM2>,
-    pub led1: Daisy24<Output<PushPull>>,
-    pub switch2: hid::Switch<Daisy28<Input<PullUp>>>,
-    pub encoder: encoder::RotaryEncoder<
-        Daisy14<Input<PullUp>>,
-        Daisy25<Input<PullUp>>,
-        Daisy26<Input<PullUp>>,
-    >,
-    pub encoder_value: i32,
-    pub biquad: DirectForm1<f32>,
-    pub grains: Grains,
+
+    // Libdaisy
+    pub control2: Adc1Control2,
+    pub led1: Led1,
+    pub switch2: Switch2,
+    pub encoder: Encoder,
+}
+
+pub struct Sitira {
+    pub audio_rate: AudioRate,
+    pub control_rate: ControlRate,
 }
 
 impl Sitira {
@@ -281,46 +291,25 @@ impl Sitira {
         let encoder =
             encoder::RotaryEncoder::new(rotary_switch_pin, rotary_clock_pin, rotary_data_pin);
 
-        let encoder_value = 0;
-
-        // setting up biquad filter
-
-        let f0 = biquad::ToHertz::hz(15_000.0);
-        let fs = biquad::ToHertz::khz(48.0);
-
-        let coeffs =
-            Coefficients::<f32>::from_params(Type::LowPass, fs, f0, Q_BUTTERWORTH_F32).unwrap();
-
-        let biquad = DirectForm1::<f32>::new(coeffs);
-
         // audio stuff
 
         let buffer = [(0.0, 0.0); audio::BLOCK_SIZE_MAX]; // audio ring buffer
-        let playhead = 457; // skip wav header information poorly
-
-        let grains = Grains::new(
-            2,
-            40.0,
-            15.0,
-            file_length_in_samples as u32,
-            WindowFunction::Sine,
-        );
 
         Self {
-            audio: system.audio,
-            buffer,
-            sdram,
-            playhead,
-            file_length_in_samples,
-            adc1,
-            control2,
-            timer2: system.timer2,
-            led1,
-            switch2,
-            encoder,
-            encoder_value,
-            biquad,
-            grains,
+            audio_rate: AudioRate {
+                audio: system.audio,
+                buffer,
+            },
+            control_rate: ControlRate {
+                sdram,
+                file_length_in_samples,
+                adc1,
+                timer2: system.timer2,
+                control2,
+                led1,
+                switch2,
+                encoder,
+            },
         }
     }
 }
