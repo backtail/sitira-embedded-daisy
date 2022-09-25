@@ -10,11 +10,15 @@ use stm32h7xx_hal::{adc, pac, stm32};
 
 use crate::encoder;
 use crate::lcd;
+use crate::rgbled::*;
 
-pub type Adc1Control2 = hid::AnalogControl<Daisy15<Analog>>;
-
-pub type Led1 = Daisy24<Output<PushPull>>;
-
+pub type Pot1 = hid::AnalogControl<Daisy21<Analog>>;
+pub type Pot2 = hid::AnalogControl<Daisy15<Analog>>;
+pub type Led1 =
+    RGBLed<Daisy20<Output<PushPull>>, Daisy19<Output<PushPull>>, Daisy18<Output<PushPull>>>;
+pub type Led2 =
+    RGBLed<Daisy17<Output<PushPull>>, Daisy24<Output<PushPull>>, Daisy23<Output<PushPull>>>;
+pub type Switch1 = hid::Switch<Daisy27<Input<PullUp>>>;
 pub type Switch2 = hid::Switch<Daisy28<Input<PullUp>>>;
 
 pub type Encoder =
@@ -50,8 +54,11 @@ pub struct ControlRate {
     pub timer2: Timer<stm32::TIM2>,
 
     // Libdaisy
-    pub control2: Adc1Control2,
+    pub pot1: Pot1,
+    pub pot2: Pot2,
     pub led1: Led1,
+    pub led2: Led2,
+    pub switch1: Switch1,
     pub switch2: Switch2,
     pub encoder: Encoder,
 }
@@ -129,8 +136,8 @@ impl Sitira {
 
         let lcd_reset = system
             .gpio
-            .daisy17
-            .expect("Failed to get pin 17 of the daisy!")
+            .daisy16
+            .expect("Failed to get pin 16 of the daisy!")
             .into_push_pull_output();
 
         let mode = Mode {
@@ -228,13 +235,26 @@ impl Sitira {
             core::panic!();
         }
 
-        // setting up ADC1 and TIM2
+        // setup TIM2
 
         system.timer2.set_freq(1.ms());
+
+        // Setup ADC1
 
         let mut adc1 = system.adc1.enable();
         adc1.set_resolution(adc::Resolution::SIXTEENBIT);
         let adc1_max_value = adc1.max_sample() as f32;
+
+        // setup analog reads from potentiometer
+
+        let pot1_pin = system
+            .gpio
+            .daisy21
+            .take()
+            .expect("Failed to get pin 21 of the daisy!")
+            .into_analog();
+
+        let pot1 = hid::AnalogControl::new(pot1_pin, adc1_max_value);
 
         let pot2_pin = system
             .gpio
@@ -243,12 +263,17 @@ impl Sitira {
             .expect("Failed to get pin 15 of the daisy!")
             .into_analog();
 
-        let _pot2_value = 0.0_f32;
+        let pot2 = hid::AnalogControl::new(pot2_pin, adc1_max_value);
 
-        let control2 = hid::AnalogControl::new(pot2_pin, adc1_max_value);
-        // control2.set_transform(|x| (x + 1.0).log10() * 2_f32.log10());
+        // setting up tactil switches
 
-        // setting up button input
+        let switch1_pin = system
+            .gpio
+            .daisy27
+            .take()
+            .expect("Failed to get pin 27 of the daisy!")
+            .into_pull_up_input();
+        let switch1 = hid::Switch::new(switch1_pin, hid::SwitchType::PullUp);
 
         let switch2_pin = system
             .gpio
@@ -258,12 +283,53 @@ impl Sitira {
             .into_pull_up_input();
         let switch2 = hid::Switch::new(switch2_pin, hid::SwitchType::PullUp);
 
-        let led1 = system
+        // setup LEDs
+
+        let led1_red = system
+            .gpio
+            .daisy20
+            .take()
+            .expect("Failed to get pin 20 of the daisy!")
+            .into_push_pull_output();
+
+        let led1_green = system
+            .gpio
+            .daisy19
+            .take()
+            .expect("Failed to get pin 19 of the daisy!")
+            .into_push_pull_output();
+
+        let led1_blue = system
+            .gpio
+            .daisy18
+            .take()
+            .expect("Failed to get pin 18 of the daisy!")
+            .into_push_pull_output();
+
+        let led1 = RGBLed::new(led1_red, led1_green, led1_blue, LEDConfig::ActiveLow, 1000);
+
+        let led2_red = system
+            .gpio
+            .daisy17
+            .take()
+            .expect("Failed to get pin 17 of the daisy!")
+            .into_push_pull_output();
+
+        let led2_green = system
             .gpio
             .daisy24
             .take()
             .expect("Failed to get pin 24 of the daisy!")
             .into_push_pull_output();
+
+        let led2_blue = system
+            .gpio
+            .daisy23
+            .take()
+            .expect("Failed to get pin 23 of the daisy!")
+            .into_push_pull_output();
+
+        let led2 = RGBLed::new(led2_red, led2_green, led2_blue, LEDConfig::ActiveLow, 1000);
 
         // setting up rotary encoder
 
@@ -305,8 +371,11 @@ impl Sitira {
                 file_length_in_samples,
                 adc1,
                 timer2: system.timer2,
-                control2,
+                pot1,
+                pot2,
                 led1,
+                led2,
+                switch1,
                 switch2,
                 encoder,
             },

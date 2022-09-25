@@ -11,12 +11,9 @@ pub mod sitira;
     peripherals = true,
 )]
 mod app {
+    use crate::sitira::{AudioRate, ControlRate, Sitira};
     use granulator::Granulator;
-    use sitira::{AudioRate, ControlRate, Sitira};
-
     use libdaisy::prelude::*;
-
-    use crate::sitira;
 
     #[shared]
     struct Shared {
@@ -92,38 +89,46 @@ mod app {
         // clear TIM2 interrupt flag
         ctx.local.cr.timer2.clear_irq();
 
-        // update adc
+        // get all hardware
         let adc1 = &mut ctx.local.cr.adc1;
-        let control2 = &mut ctx.local.cr.control2;
-        if let Ok(data) = adc1.read(control2.get_pin()) {
-            control2.update(data);
-        }
-
-        // update switch
+        let pot1 = &mut ctx.local.cr.pot1;
+        let pot2 = &mut ctx.local.cr.pot2;
+        let switch1 = &mut ctx.local.cr.switch1;
         let switch2 = &mut ctx.local.cr.switch2;
-        switch2.update();
-
-        // switches are configured as active low
-        if switch2.is_low() {
-            ctx.local.cr.led1.set_high().unwrap();
-        }
-        if switch2.is_high() {
-            ctx.local.cr.led1.set_low().unwrap();
-        }
-
-        // update encoder
+        let led1 = &mut ctx.local.cr.led1;
+        let led2 = &mut ctx.local.cr.led2;
         let encoder = &mut ctx.local.cr.encoder;
+
+        // update all the hardware
+        if let Ok(data) = adc1.read(pot1.get_pin()) {
+            pot1.update(data);
+        }
+        if let Ok(data) = adc1.read(pot2.get_pin()) {
+            pot2.update(data);
+        }
+        switch1.update();
+        switch2.update();
+        led1.update();
+        led2.update();
         encoder.update();
 
+        // cycle switch color
+        if switch1.is_pressed() {
+            led1.cycle_color();
+        }
+        if switch2.is_pressed() {
+            led2.cycle_color();
+        }
+
         // calculate buffer offset
-        let offset = (ctx.local.cr.file_length_in_samples as f32 * control2.get_value()) as usize;
+        let offset = (ctx.local.cr.file_length_in_samples as f32 * pot1.get_value()) as usize;
 
         // update the granulator with the new values
         ctx.shared.granulator.lock(|granulator| {
             granulator.set_offset(offset);
-            granulator.set_active_grains(granulator::MAX_GRAINS / 2);
+            granulator.set_active_grains(encoder.current_value as usize);
             granulator.set_grain_size(300.0);
-            granulator.set_pitch(encoder.current_value as f32);
+            granulator.set_pitch(pot2.get_value());
             granulator.set_master_volume(5.0);
         });
     }
