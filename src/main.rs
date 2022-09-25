@@ -3,6 +3,7 @@
 
 pub mod encoder;
 pub mod lcd;
+pub mod rgbled;
 pub mod sitira;
 
 #[rtic::app(
