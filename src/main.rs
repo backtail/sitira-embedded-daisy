@@ -3,6 +3,7 @@
 
 pub mod encoder;
 pub mod lcd;
+pub mod rgbled;
 pub mod sitira;
 
 #[rtic::app(
@@ -10,62 +11,40 @@ pub mod sitira;
     peripherals = true,
 )]
 mod app {
-
-    use crate::{encoder, sitira};
-    use biquad::*;
-    use libdaisy::{audio, gpio::*, hid, prelude::*};
-    use stm32h7xx_hal::timer::Timer;
-    use stm32h7xx_hal::{adc, stm32};
+    use crate::sitira::{AudioRate, ControlRate, Sitira};
+    use granulator::Granulator;
+    use libdaisy::prelude::*;
 
     #[shared]
     struct Shared {
-        _pot2_value: f32,
-        encoder_value: i32,
-        biquad: DirectForm1<f32>,
+        granulator: Granulator,
     }
 
     #[local]
     struct Local {
-        audio: audio::Audio,
-        buffer: audio::AudioBuffer,
-        sdram: &'static mut [f32],
-        playhead: usize,
-        file_length_in_samples: usize,
-        adc1: adc::Adc<stm32::ADC1, adc::Enabled>,
-        control2: hid::AnalogControl<Daisy15<Analog>>,
-        timer2: Timer<stm32::TIM2>,
-        led1: Daisy24<Output<PushPull>>,
-        switch2: hid::Switch<Daisy28<Input<PullUp>>>,
-        encoder: encoder::RotaryEncoder<
-            Daisy14<Input<PullUp>>,
-            Daisy25<Input<PullUp>>,
-            Daisy26<Input<PullUp>>,
-        >,
+        ar: AudioRate,
+        cr: ControlRate,
     }
 
     #[init]
     fn init(ctx: init::Context) -> (Shared, Local, init::Monotonics) {
         // initiate system
-        let s = sitira::Sitira::init(ctx.core, ctx.device);
+        let sitira = Sitira::init(ctx.core, ctx.device);
+
+        // create the granulator object
+        let mut granulator = Granulator::new(libdaisy::AUDIO_SAMPLE_RATE);
+
+        // create slice of loaded audio files
+        let slice = &sitira.control_rate.sdram[0..sitira.control_rate.file_length_in_samples];
+
+        // set the audio buffer
+        granulator.set_audio_buffer(slice);
 
         (
-            Shared {
-                _pot2_value: 0.0,
-                encoder_value: s.encoder_value,
-                biquad: s.biquad,
-            },
+            Shared { granulator },
             Local {
-                audio: s.audio,
-                buffer: s.buffer,
-                sdram: s.sdram,
-                playhead: s.playhead,
-                file_length_in_samples: s.file_length_in_samples,
-                adc1: s.adc1,
-                control2: s.control2,
-                timer2: s.timer2,
-                led1: s.led1,
-                switch2: s.switch2,
-                encoder: s.encoder,
+                ar: sitira.audio_rate,
+                cr: sitira.control_rate,
             },
             init::Monotonics(),
         )
@@ -81,77 +60,78 @@ mod app {
     }
 
     // Interrupt handler for audio
-    #[task(binds = DMA1_STR1, local = [audio, buffer, playhead, sdram, file_length_in_samples, index: usize = 0], shared = [biquad], priority = 8)]
+    #[task(binds = DMA1_STR1, local = [ar], shared = [granulator], priority = 8)]
     fn audio_handler(ctx: audio_handler::Context) {
-        let audio = ctx.local.audio;
-        let mut buffer = *ctx.local.buffer;
-        let sdram: &mut [f32] = *ctx.local.sdram;
-        let mut index = *ctx.local.index + *ctx.local.playhead;
-        let mut biquad = ctx.shared.biquad;
+        let audio = &mut ctx.local.ar.audio;
+        let mut buffer = ctx.local.ar.buffer;
+        let mut granulator = ctx.shared.granulator;
 
+        // is somehow necessary
         audio.get_stereo(&mut buffer);
-        for (_left, _right) in buffer {
-            let mut mono = sdram[index] * 0.7; // multiply with 0.7 for no distortion
-            biquad.lock(|biquad| {
-                mono = biquad.run(mono);
-            });
-            audio.push_stereo((mono, mono)).unwrap();
-            index += 1;
-        }
 
-        if *ctx.local.playhead < *ctx.local.file_length_in_samples {
-            *ctx.local.playhead += audio::BLOCK_SIZE_MAX;
-        } else {
-            *ctx.local.playhead = 457; // very cheap method of skipping the wav file header
+        // loop over buffer
+        for (_left, _right) in buffer {
+            let mut mono_sample: f32 = 0.0;
+
+            // lock granulator
+            granulator.lock(|granulator| {
+                mono_sample = granulator.get_next_sample();
+            });
+
+            // push audio into stream
+            audio.push_stereo((mono_sample, mono_sample)).unwrap();
         }
     }
 
     // read values from pot 2 and switch 2 of daisy pod
-    #[task(binds = TIM2, local = [timer2, adc1, control2, switch2, led1, encoder], shared = [biquad,encoder_value])]
-    fn interface_handler(mut ctx: interface_handler::Context) {
-        ctx.local.timer2.clear_irq();
-        let adc1 = ctx.local.adc1;
-        let control2 = ctx.local.control2;
+    #[task(binds = TIM2, local = [cr], shared = [granulator])]
+    fn update_handler(mut ctx: update_handler::Context) {
+        // clear TIM2 interrupt flag
+        ctx.local.cr.timer2.clear_irq();
 
-        if let Ok(data) = adc1.read(control2.get_pin()) {
-            control2.update(data);
+        // get all hardware
+        let adc1 = &mut ctx.local.cr.adc1;
+        let pot1 = &mut ctx.local.cr.pot1;
+        let pot2 = &mut ctx.local.cr.pot2;
+        let switch1 = &mut ctx.local.cr.switch1;
+        let switch2 = &mut ctx.local.cr.switch2;
+        let led1 = &mut ctx.local.cr.led1;
+        let led2 = &mut ctx.local.cr.led2;
+        let encoder = &mut ctx.local.cr.encoder;
+
+        // update all the hardware
+        if let Ok(data) = adc1.read(pot1.get_pin()) {
+            pot1.update(data);
         }
-
-        let mut value = control2.get_value();
-
-        value = value * 20_000.0 + 20.0;
-
-        ctx.shared.biquad.lock(|biquad| {
-            biquad.replace_coefficients(
-                Coefficients::<f32>::from_params(
-                    Type::LowPass,
-                    biquad::ToHertz::khz(48.0),
-                    biquad::ToHertz::hz(value),
-                    Q_BUTTERWORTH_F32,
-                )
-                .unwrap(),
-            );
-        });
-
-        let switch2 = ctx.local.switch2;
+        if let Ok(data) = adc1.read(pot2.get_pin()) {
+            pot2.update(data);
+        }
+        switch1.update();
         switch2.update();
-
-        // switches are configured as active low
-        if switch2.is_low() {
-            ctx.local.led1.set_high().unwrap();
-        }
-
-        if switch2.is_high() {
-            ctx.local.led1.set_low().unwrap();
-        }
-
-        let encoder = ctx.local.encoder;
+        led1.update();
+        led2.update();
         encoder.update();
 
-        ctx.shared.encoder_value.lock(|encoder_value| {
-            if encoder.current_value != *encoder_value {
-                *encoder_value = encoder.current_value;
-            }
+        // cycle switch color
+        if switch1.is_pressed() {
+            led1.cycle_color();
+        }
+        if switch2.is_pressed() {
+            led2.cycle_color();
+        }
+
+        // calculate buffer offset
+        let offset = (ctx.local.cr.file_length_in_samples as f32 * pot1.get_value()) as usize;
+
+        // update the granulator with the new values
+        ctx.shared.granulator.lock(|granulator| {
+            granulator.set_offset(offset);
+            granulator.set_active_grains(granulator::MAX_GRAINS);
+            granulator.set_grain_size(encoder.current_value as f32 * 20.0);
+            granulator.set_pitch(pot2.get_value() * 5.0);
+            granulator.set_master_volume(1.0);
+
+            granulator.update_scheduler(core::time::Duration::from_millis(1));
         });
     }
 }

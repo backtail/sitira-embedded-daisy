@@ -8,11 +8,21 @@ use stm32h7xx_hal::time::U32Ext;
 use stm32h7xx_hal::timer::Timer;
 use stm32h7xx_hal::{adc, pac, stm32};
 
-use biquad::*;
-use micromath::F32Ext;
-
 use crate::encoder;
 use crate::lcd;
+use crate::rgbled::*;
+
+pub type Pot1 = hid::AnalogControl<Daisy21<Analog>>;
+pub type Pot2 = hid::AnalogControl<Daisy15<Analog>>;
+pub type Led1 =
+    RGBLed<Daisy20<Output<PushPull>>, Daisy19<Output<PushPull>>, Daisy18<Output<PushPull>>>;
+pub type Led2 =
+    RGBLed<Daisy17<Output<PushPull>>, Daisy24<Output<PushPull>>, Daisy23<Output<PushPull>>>;
+pub type Switch1 = hid::Switch<Daisy27<Input<PullUp>>>;
+pub type Switch2 = hid::Switch<Daisy28<Input<PullUp>>>;
+
+pub type Encoder =
+    encoder::RotaryEncoder<Daisy14<Input<PullUp>>, Daisy25<Input<PullUp>>, Daisy26<Input<PullUp>>>;
 
 struct FakeTime;
 
@@ -29,24 +39,33 @@ impl TimeSource for FakeTime {
     }
 }
 
-pub struct Sitira {
+pub struct AudioRate {
     pub audio: audio::Audio,
     pub buffer: audio::AudioBuffer,
+}
+
+pub struct ControlRate {
+    // Audio
     pub sdram: &'static mut [f32],
-    pub playhead: usize,
     pub file_length_in_samples: usize,
+
+    // HAL
     pub adc1: adc::Adc<stm32::ADC1, adc::Enabled>,
-    pub control2: hid::AnalogControl<Daisy15<Analog>>,
     pub timer2: Timer<stm32::TIM2>,
-    pub led1: Daisy24<Output<PushPull>>,
-    pub switch2: hid::Switch<Daisy28<Input<PullUp>>>,
-    pub encoder: encoder::RotaryEncoder<
-        Daisy14<Input<PullUp>>,
-        Daisy25<Input<PullUp>>,
-        Daisy26<Input<PullUp>>,
-    >,
-    pub encoder_value: i32,
-    pub biquad: DirectForm1<f32>,
+
+    // Libdaisy
+    pub pot1: Pot1,
+    pub pot2: Pot2,
+    pub led1: Led1,
+    pub led2: Led2,
+    pub switch1: Switch1,
+    pub switch2: Switch2,
+    pub encoder: Encoder,
+}
+
+pub struct Sitira {
+    pub audio_rate: AudioRate,
+    pub control_rate: ControlRate,
 }
 
 impl Sitira {
@@ -117,8 +136,8 @@ impl Sitira {
 
         let lcd_reset = system
             .gpio
-            .daisy17
-            .expect("Failed to get pin 17 of the daisy!")
+            .daisy16
+            .expect("Failed to get pin 16 of the daisy!")
             .into_push_pull_output();
 
         let mode = Mode {
@@ -147,7 +166,7 @@ impl Sitira {
 
         // setting up SD Card and reading wav files
 
-        let file_name = "KICADI~1.WAV";
+        let file_name = "B.WAV";
         let file_length_in_samples;
 
         // initiate SD card connection
@@ -171,7 +190,7 @@ impl Sitira {
 
                     lcd.draw_loading_bar(0, file_name);
 
-                    const CHUNK_SIZE: usize = 48_000; // has to be a multiple of 4, bigger chunks mean faster loading times
+                    const CHUNK_SIZE: usize = 10_000; // has to be a multiple of 4, bigger chunks mean faster loading times
                     let chunk_iterator = file_length_in_bytes / CHUNK_SIZE;
                     file.seek_from_start(2).unwrap(); // offset the reading of the chunks
 
@@ -216,13 +235,26 @@ impl Sitira {
             core::panic!();
         }
 
-        // setting up ADC1 and TIM2
+        // setup TIM2
 
         system.timer2.set_freq(1.ms());
+
+        // Setup ADC1
 
         let mut adc1 = system.adc1.enable();
         adc1.set_resolution(adc::Resolution::SIXTEENBIT);
         let adc1_max_value = adc1.max_sample() as f32;
+
+        // setup analog reads from potentiometer
+
+        let pot1_pin = system
+            .gpio
+            .daisy21
+            .take()
+            .expect("Failed to get pin 21 of the daisy!")
+            .into_analog();
+
+        let pot1 = hid::AnalogControl::new(pot1_pin, adc1_max_value);
 
         let pot2_pin = system
             .gpio
@@ -231,12 +263,17 @@ impl Sitira {
             .expect("Failed to get pin 15 of the daisy!")
             .into_analog();
 
-        let _pot2_value = 0.0_f32;
+        let pot2 = hid::AnalogControl::new(pot2_pin, adc1_max_value);
 
-        let mut control2 = hid::AnalogControl::new(pot2_pin, adc1_max_value);
-        control2.set_transform(|x| (x + 1.0).log10() * 2_f32.log10());
+        // setting up tactil switches
 
-        // setting up button input
+        let switch1_pin = system
+            .gpio
+            .daisy27
+            .take()
+            .expect("Failed to get pin 27 of the daisy!")
+            .into_pull_up_input();
+        let switch1 = hid::Switch::new(switch1_pin, hid::SwitchType::PullUp);
 
         let switch2_pin = system
             .gpio
@@ -246,12 +283,53 @@ impl Sitira {
             .into_pull_up_input();
         let switch2 = hid::Switch::new(switch2_pin, hid::SwitchType::PullUp);
 
-        let led1 = system
+        // setup LEDs
+
+        let led1_red = system
+            .gpio
+            .daisy20
+            .take()
+            .expect("Failed to get pin 20 of the daisy!")
+            .into_push_pull_output();
+
+        let led1_green = system
+            .gpio
+            .daisy19
+            .take()
+            .expect("Failed to get pin 19 of the daisy!")
+            .into_push_pull_output();
+
+        let led1_blue = system
+            .gpio
+            .daisy18
+            .take()
+            .expect("Failed to get pin 18 of the daisy!")
+            .into_push_pull_output();
+
+        let led1 = RGBLed::new(led1_red, led1_green, led1_blue, LEDConfig::ActiveLow, 1000);
+
+        let led2_red = system
+            .gpio
+            .daisy17
+            .take()
+            .expect("Failed to get pin 17 of the daisy!")
+            .into_push_pull_output();
+
+        let led2_green = system
             .gpio
             .daisy24
             .take()
             .expect("Failed to get pin 24 of the daisy!")
             .into_push_pull_output();
+
+        let led2_blue = system
+            .gpio
+            .daisy23
+            .take()
+            .expect("Failed to get pin 23 of the daisy!")
+            .into_push_pull_output();
+
+        let led2 = RGBLed::new(led2_red, led2_green, led2_blue, LEDConfig::ActiveLow, 1000);
 
         // setting up rotary encoder
 
@@ -279,37 +357,28 @@ impl Sitira {
         let encoder =
             encoder::RotaryEncoder::new(rotary_switch_pin, rotary_clock_pin, rotary_data_pin);
 
-        let encoder_value = 0;
-
-        // setting up biquad filter
-
-        let f0 = biquad::ToHertz::hz(100.0);
-        let fs = biquad::ToHertz::khz(48.0);
-
-        let coeffs =
-            Coefficients::<f32>::from_params(Type::LowPass, fs, f0, Q_BUTTERWORTH_F32).unwrap();
-
-        let biquad = DirectForm1::<f32>::new(coeffs);
-
         // audio stuff
 
         let buffer = [(0.0, 0.0); audio::BLOCK_SIZE_MAX]; // audio ring buffer
-        let playhead = 457; // skip wav header information poorly
 
         Self {
-            audio: system.audio,
-            buffer,
-            sdram,
-            playhead,
-            file_length_in_samples,
-            adc1,
-            control2,
-            timer2: system.timer2,
-            led1,
-            switch2,
-            encoder,
-            encoder_value,
-            biquad,
+            audio_rate: AudioRate {
+                audio: system.audio,
+                buffer,
+            },
+            control_rate: ControlRate {
+                sdram,
+                file_length_in_samples,
+                adc1,
+                timer2: system.timer2,
+                pot1,
+                pot2,
+                led1,
+                led2,
+                switch1,
+                switch2,
+                encoder,
+            },
         }
     }
 }

@@ -1,0 +1,6 @@
+[submodule "granulator"]
+	path = granulator
+	url = https://github.com/backtail/granulator
+[submodule "libdaisy-rust"]
+	path = libdaisy-rust
+	url = https://github.com/backtail/libdaisy-rust
