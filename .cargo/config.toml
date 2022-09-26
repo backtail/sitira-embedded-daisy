@@ -1,11 +1,17 @@
 [target.thumbv7em-none-eabihf]
 runner = "gdb-multiarch -q"
 rustflags = [
-    "-C", "link-arg=-Tlink.x", "-C", "opt-level=z", 
+    "-C", "link-arg=-Tlink.x", 
 ]
 
 [build]
 target = "thumbv7em-none-eabihf" # Cortex-M4F and Cortex-M7F (with FPU)
+
+[profile.dev]
+opt-level = 'z'  
+lto = false   
+codegen-units = 16 
+panic = 'unwind'  
 
 [profile.release]
 opt-level = 'z'     # Optimize for size.
