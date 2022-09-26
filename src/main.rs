@@ -126,10 +126,12 @@ mod app {
         // update the granulator with the new values
         ctx.shared.granulator.lock(|granulator| {
             granulator.set_offset(offset);
-            granulator.set_active_grains(encoder.current_value as usize);
-            granulator.set_grain_size(300.0);
-            granulator.set_pitch(pot2.get_value());
-            granulator.set_master_volume(5.0);
+            granulator.set_active_grains(granulator::MAX_GRAINS);
+            granulator.set_grain_size(encoder.current_value as f32 * 20.0);
+            granulator.set_pitch(pot2.get_value() * 5.0);
+            granulator.set_master_volume(1.0);
+
+            granulator.update_scheduler(core::time::Duration::from_millis(1));
         });
     }
 }
