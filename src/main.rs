@@ -14,6 +14,7 @@ pub const CONTROL_RATE_IN_MS: u32 = 10;
 )]
 mod app {
     use crate::{
+        rgbled::RGBColors,
         sitira::{AudioRate, ControlRate, Sitira},
         CONTROL_RATE_IN_MS,
     };
@@ -29,6 +30,7 @@ mod app {
     struct Local {
         ar: AudioRate,
         cr: ControlRate,
+        parameter_page: usize,
     }
 
     #[init]
@@ -50,6 +52,7 @@ mod app {
             Local {
                 ar: sitira.audio_rate,
                 cr: sitira.control_rate,
+                parameter_page: 0,
             },
             init::Monotonics(),
         )
@@ -89,8 +92,8 @@ mod app {
     }
 
     // read values from pot 2 and switch 2 of daisy pod
-    #[task(binds = TIM2, local = [cr], shared = [granulator])]
-    fn update_handler(mut ctx: update_handler::Context) {
+    #[task(binds = TIM2, local = [cr, parameter_page], shared = [granulator])]
+    fn update_handler(ctx: update_handler::Context) {
         // clear TIM2 interrupt flag
         ctx.local.cr.timer2.clear_irq();
 
@@ -103,6 +106,12 @@ mod app {
         let led1 = &mut ctx.local.cr.led1;
         let led2 = &mut ctx.local.cr.led2;
         let encoder = &mut ctx.local.cr.encoder;
+
+        // local parameters
+        let mut parameter_page = *ctx.local.parameter_page;
+
+        // shared
+        let mut granulator = ctx.shared.granulator;
 
         // update all the hardware
         if let Ok(data) = adc1.read(pot1.get_pin()) {
@@ -117,27 +126,64 @@ mod app {
         led2.update();
         encoder.update();
 
-        // cycle switch color
-        if switch1.is_pressed() {
-            led1.cycle_color();
+        // detect if encoder button has been pressed
+        // if pressed, change parameter page
+        if encoder.switch.is_pressed() {
+            parameter_page += 1;
+            if parameter_page > 3 {
+                parameter_page = 0;
+            }
         }
-        if switch2.is_pressed() {
-            led2.cycle_color();
+
+        // set parameter depending on current page
+        match parameter_page {
+            // Grain Size
+            0 => {
+                led2.set_simple_color(RGBColors::Blue);
+                granulator.lock(|g| {
+                    g.set_grain_size(pot1.get_value() * ctx.local.cr.file_length_in_samples as f32);
+                });
+            }
+
+            // Pitch
+            1 => {
+                led2.set_simple_color(RGBColors::Red);
+                granulator.lock(|g| {
+                    g.set_pitch(pot1.get_value() * 20.0);
+                });
+            }
+
+            // Offset
+            2 => {
+                led2.set_simple_color(RGBColors::Green);
+                granulator.lock(|g| {
+                    g.set_offset(
+                        (pot1.get_value() * ctx.local.cr.file_length_in_samples as f32) as usize,
+                    );
+                });
+            }
+
+            // Active Grains
+            3 => {
+                led2.set_simple_color(RGBColors::White);
+                granulator.lock(|g| {
+                    g.set_active_grains(
+                        (pot1.get_value() * granulator::MAX_GRAINS as f32) as usize,
+                    );
+                });
+            }
+
+            _ => {}
         }
 
-        // calculate buffer offset
-        let offset = (ctx.local.cr.file_length_in_samples as f32 * pot1.get_value()) as usize;
+        // set master volume
+        granulator.lock(|g| {
+            g.set_master_volume(encoder.current_value as f32 * 0.5);
+        });
 
-        // update the granulator with the new values
-        ctx.shared.granulator.lock(|granulator| {
-            granulator.set_offset(offset);
-            granulator.set_active_grains(granulator::MAX_GRAINS);
-            granulator.set_grain_size(encoder.current_value as f32 * 20.0);
-            granulator.set_pitch(pot2.get_value() * 5.0);
-            granulator.set_master_volume(1.0);
-
-            granulator
-                .update_scheduler(core::time::Duration::from_millis(CONTROL_RATE_IN_MS as u64));
+        // update the scheduler
+        granulator.lock(|g| {
+            g.update_scheduler(core::time::Duration::from_millis(CONTROL_RATE_IN_MS as u64));
         });
     }
 }
