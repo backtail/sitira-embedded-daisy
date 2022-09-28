@@ -11,6 +11,7 @@ use stm32h7xx_hal::{adc, pac, stm32};
 use crate::encoder;
 use crate::lcd;
 use crate::rgbled::*;
+use crate::CONTROL_RATE_IN_MS;
 
 pub type Pot1 = hid::AnalogControl<Daisy21<Analog>>;
 pub type Pot2 = hid::AnalogControl<Daisy15<Analog>>;
@@ -237,7 +238,7 @@ impl Sitira {
 
         // setup TIM2
 
-        system.timer2.set_freq(1.ms());
+        system.timer2.set_freq(CONTROL_RATE_IN_MS.ms());
 
         // Setup ADC1
 

@@ -6,12 +6,17 @@ pub mod lcd;
 pub mod rgbled;
 pub mod sitira;
 
+pub const CONTROL_RATE_IN_MS: u32 = 10;
+
 #[rtic::app(
     device = stm32h7xx_hal::stm32,
     peripherals = true,
 )]
 mod app {
-    use crate::sitira::{AudioRate, ControlRate, Sitira};
+    use crate::{
+        sitira::{AudioRate, ControlRate, Sitira},
+        CONTROL_RATE_IN_MS,
+    };
     use granulator::Granulator;
     use libdaisy::prelude::*;
 
@@ -131,7 +136,8 @@ mod app {
             granulator.set_pitch(pot2.get_value() * 5.0);
             granulator.set_master_volume(1.0);
 
-            granulator.update_scheduler(core::time::Duration::from_millis(1));
+            granulator
+                .update_scheduler(core::time::Duration::from_millis(CONTROL_RATE_IN_MS as u64));
         });
     }
 }
