@@ -31,6 +31,7 @@ mod app {
         ar: AudioRate,
         cr: ControlRate,
         parameter_page: usize,
+        shift: bool,
     }
 
     #[init]
@@ -47,12 +48,16 @@ mod app {
         // set the audio buffer
         granulator.set_audio_buffer(slice);
 
+        // set master volume to 1.0
+        granulator.set_master_volume(1.0);
+
         (
             Shared { granulator },
             Local {
                 ar: sitira.audio_rate,
                 cr: sitira.control_rate,
                 parameter_page: 0,
+                shift: false,
             },
             init::Monotonics(),
         )
@@ -92,7 +97,7 @@ mod app {
     }
 
     // read values from pot 2 and switch 2 of daisy pod
-    #[task(binds = TIM2, local = [cr, parameter_page], shared = [granulator])]
+    #[task(binds = TIM2, local = [cr, parameter_page, shift], shared = [granulator])]
     fn update_handler(ctx: update_handler::Context) {
         // clear TIM2 interrupt flag
         ctx.local.cr.timer2.clear_irq();
@@ -100,12 +105,16 @@ mod app {
         // get all hardware
         let adc1 = &mut ctx.local.cr.adc1;
         let pot1 = &mut ctx.local.cr.pot1;
+        let pot2 = &mut ctx.local.cr.pot2;
+        let switch1 = &mut ctx.local.cr.switch1;
+        let switch2 = &mut ctx.local.cr.switch2;
         let led1 = &mut ctx.local.cr.led1;
         let led2 = &mut ctx.local.cr.led2;
         let encoder = &mut ctx.local.cr.encoder;
 
         // local parameters
-        let mut parameter_page = *ctx.local.parameter_page;
+        let parameter_page = ctx.local.parameter_page;
+        let shift = ctx.local.shift;
 
         // shared
         let mut granulator = ctx.shared.granulator;
@@ -114,76 +123,49 @@ mod app {
         if let Ok(data) = adc1.read(pot1.get_pin()) {
             pot1.update(data);
         }
+        if let Ok(data) = adc1.read(pot2.get_pin()) {
+            pot2.update(data);
+        }
         led1.update();
         led2.update();
+        switch1.update();
+        switch2.update();
         encoder.update();
 
-        // detect if encoder button has been pressed
-        // if pressed, change parameter page
-        if encoder.switch.is_pressed() {
-            parameter_page += 1;
-            if parameter_page > 3 {
-                parameter_page = 0;
+        // parameter pages
+        if switch1.is_pressed() {
+            *parameter_page += 1;
+            if *parameter_page > 1 {
+                *parameter_page = 0;
             }
         }
 
-        // set parameter depending on current page
-        match parameter_page {
-            // Grain Size
-            0 => {
-                led2.set_simple_color(RGBColors::Blue);
-                granulator.lock(|g| {
-                    g.set_grain_size(pot1.get_value() * ctx.local.cr.file_length_in_samples as f32);
-                });
-            }
-
-            // Pitch
-            1 => {
-                led2.set_simple_color(RGBColors::Red);
-                granulator.lock(|g| {
-                    g.set_pitch(pot1.get_value() * 20.0);
-                });
-            }
-
-            // Offset
-            2 => {
-                led2.set_simple_color(RGBColors::Green);
-                granulator.lock(|g| {
-                    g.set_offset(
-                        (pot1.get_value() * ctx.local.cr.file_length_in_samples as f32) as usize,
-                    );
-                });
-            }
-
-            // Active Grains
-            3 => {
-                led2.set_simple_color(RGBColors::White);
-                granulator.lock(|g| {
-                    g.set_active_grains(
-                        (pot1.get_value() * granulator::MAX_GRAINS as f32) as usize,
-                    );
-                });
-            }
-
-            _ => {}
+        if *parameter_page == 0 {
+            led1.set_simple_color(RGBColors::Blue);
+            granulator.lock(|g| {
+                g.set_grain_size(pot1.get_value() * 1000.0);
+                g.set_pitch(pot2.get_value() * 20.0);
+            });
+        }
+        if *parameter_page == 1 {
+            led1.set_simple_color(RGBColors::Red);
+            granulator.lock(|g| {
+                g.set_offset(
+                    (pot1.get_value() * ctx.local.cr.file_length_in_samples as f32) as usize,
+                );
+                g.set_active_grains((pot2.get_value() * granulator::MAX_GRAINS as f32) as usize);
+            });
         }
 
-        let encoder_value = encoder.current_value as f32;
-
-        // set master volume
-        granulator.lock(|g| {
-            g.set_master_volume(encoder_value * 0.5);
-        });
-
-        // led1 is following the master volume intensity
-        if encoder_value <= 0 {
-            led1.set_color(0.0, 0.0, 0.0);
+        // shift button
+        if switch2.is_pressed() {
+            *shift = !*shift;
         }
-        if encoder_value > 0 && encoder_value < 10 {
-            led1.set_color(encoder_value / 10.0, 0.0, 0.0);
-        }
-        if encoder_value >= 10 {
-            led1.set_color(1.0, 0.0, 0.0);
+
+        if *shift {
+            led2.set_simple_color(RGBColors::Green);
+        } else {
+            led2.set_simple_color(RGBColors::Black);
         }
 
         // update the scheduler
