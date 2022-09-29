@@ -100,9 +100,6 @@ mod app {
         // get all hardware
         let adc1 = &mut ctx.local.cr.adc1;
         let pot1 = &mut ctx.local.cr.pot1;
-        let pot2 = &mut ctx.local.cr.pot2;
-        let switch1 = &mut ctx.local.cr.switch1;
-        let switch2 = &mut ctx.local.cr.switch2;
         let led1 = &mut ctx.local.cr.led1;
         let led2 = &mut ctx.local.cr.led2;
         let encoder = &mut ctx.local.cr.encoder;
@@ -117,11 +114,6 @@ mod app {
         if let Ok(data) = adc1.read(pot1.get_pin()) {
             pot1.update(data);
         }
-        if let Ok(data) = adc1.read(pot2.get_pin()) {
-            pot2.update(data);
-        }
-        switch1.update();
-        switch2.update();
         led1.update();
         led2.update();
         encoder.update();
@@ -176,10 +168,23 @@ mod app {
             _ => {}
         }
 
+        let encoder_value = encoder.current_value as f32;
+
         // set master volume
         granulator.lock(|g| {
-            g.set_master_volume(encoder.current_value as f32 * 0.5);
+            g.set_master_volume(encoder_value * 0.5);
         });
+
+        // led1 is following the master volume intensity
+        if encoder_value <= 0 {
+            led1.set_color(0.0, 0.0, 0.0);
+        }
+        if encoder_value > 0 && encoder_value < 10 {
+            led1.set_color(encoder_value / 10.0, 0.0, 0.0);
+        }
+        if encoder_value >= 10 {
+            led1.set_color(1.0, 0.0, 0.0);
+        }
 
         // update the scheduler
         granulator.lock(|g| {
