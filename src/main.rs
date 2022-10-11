@@ -6,7 +6,7 @@ pub mod lcd;
 pub mod rgbled;
 pub mod sitira;
 
-pub const CONTROL_RATE_IN_MS: u32 = 10;
+pub const CONTROL_RATE_IN_MS: u32 = 1;
 
 #[rtic::app(
     device = stm32h7xx_hal::stm32,
@@ -15,7 +15,7 @@ pub const CONTROL_RATE_IN_MS: u32 = 10;
 mod app {
     use crate::{
         rgbled::RGBColors,
-        sitira::{AudioRate, ControlRate, Sitira},
+        sitira::{AudioRate, ControlRate, Sitira, VisualRate},
         CONTROL_RATE_IN_MS,
     };
     use granulator::Granulator;
@@ -30,6 +30,7 @@ mod app {
     struct Local {
         ar: AudioRate,
         cr: ControlRate,
+        vr: VisualRate,
         parameter_page: usize,
         shift: bool,
     }
@@ -37,25 +38,23 @@ mod app {
     #[init]
     fn init(ctx: init::Context) -> (Shared, Local, init::Monotonics) {
         // initiate system
-        let sitira = Sitira::init(ctx.core, ctx.device);
+        let mut sitira = Sitira::init(ctx.core, ctx.device);
 
         // create the granulator object
         let mut granulator = Granulator::new(libdaisy::AUDIO_SAMPLE_RATE);
 
-        // create slice of loaded audio files
-        let slice = &sitira.control_rate.sdram[0..sitira.control_rate.file_length_in_samples];
-
-        // set the audio buffer
-        granulator.set_audio_buffer(slice);
-
         // set master volume to 1.0
         granulator.set_master_volume(1.0);
+
+        // activate timer 4 interrupt
+        rtic::pend(stm32h7xx_hal::interrupt::TIM4);
 
         (
             Shared { granulator },
             Local {
                 ar: sitira.audio_rate,
                 cr: sitira.control_rate,
+                vr: sitira.visual_rate,
                 parameter_page: 0,
                 shift: false,
             },
@@ -133,7 +132,7 @@ mod app {
         encoder.update();
 
         // parameter pages
-        if switch1.is_pressed() {
+        if switch1.is_held() {
             *parameter_page += 1;
             if *parameter_page > 1 {
                 *parameter_page = 0;
@@ -150,15 +149,13 @@ mod app {
         if *parameter_page == 1 {
             led1.set_simple_color(RGBColors::Red);
             granulator.lock(|g| {
-                g.set_offset(
-                    (pot1.get_value() * ctx.local.cr.file_length_in_samples as f32) as usize,
-                );
+                g.set_offset(pot1.get_value() as usize); // CHANGE THIS TO NEW API
                 g.set_active_grains((pot2.get_value() * granulator::MAX_GRAINS as f32) as usize);
             });
         }
 
         // shift button
-        if switch2.is_pressed() {
+        if switch2.is_held() {
             *shift = !*shift;
         }
 
@@ -172,5 +169,15 @@ mod app {
         granulator.lock(|g| {
             g.update_scheduler(core::time::Duration::from_millis(CONTROL_RATE_IN_MS as u64));
         });
+    }
+
+    #[task(binds = TIM4, local = [vr])]
+    fn display_handler(ctx: display_handler::Context) {
+        // clear TIM2 interrupt flag
+        ctx.local.vr.timer4.clear_irq();
+
+        // setup
+        let _lcd = &mut ctx.local.vr.lcd;
+        let _sdram = &ctx.local.vr.sdram;
     }
 }

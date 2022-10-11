@@ -3,7 +3,8 @@ use embedded_sdmmc::{Controller, TimeSource, Timestamp, VolumeIdx};
 use libdaisy::prelude::*;
 use libdaisy::{audio, gpio::*, hid, sdmmc, system::System};
 
-use stm32h7xx_hal::spi::Mode;
+use stm32h7xx_hal::spi::{Enabled, Mode, Spi};
+use stm32h7xx_hal::stm32::SPI1;
 use stm32h7xx_hal::time::U32Ext;
 use stm32h7xx_hal::timer::Timer;
 use stm32h7xx_hal::{adc, pac, stm32};
@@ -22,8 +23,18 @@ pub type Led2 =
 pub type Switch1 = hid::Switch<Daisy27<Input<PullUp>>>;
 pub type Switch2 = hid::Switch<Daisy28<Input<PullUp>>>;
 
-pub type Encoder =
-    encoder::RotaryEncoder<Daisy14<Input<PullUp>>, Daisy25<Input<PullUp>>, Daisy26<Input<PullUp>>>;
+pub type Encoder = encoder::RotaryEncoder<
+    Daisy14<Input<PullDown>>,
+    Daisy25<Input<PullUp>>,
+    Daisy26<Input<PullUp>>,
+>;
+
+pub type Display = lcd::Lcd<
+    Spi<SPI1, Enabled>,
+    Daisy11<Output<PushPull>>,
+    Daisy12<Output<PushPull>>,
+    Daisy16<Output<PushPull>>,
+>;
 
 struct FakeTime;
 
@@ -46,10 +57,6 @@ pub struct AudioRate {
 }
 
 pub struct ControlRate {
-    // Audio
-    pub sdram: &'static mut [f32],
-    pub file_length_in_samples: usize,
-
     // HAL
     pub adc1: adc::Adc<stm32::ADC1, adc::Enabled>,
     pub timer2: Timer<stm32::TIM2>,
@@ -64,9 +71,16 @@ pub struct ControlRate {
     pub encoder: Encoder,
 }
 
+pub struct VisualRate {
+    pub lcd: Display,
+    pub timer4: Timer<stm32::TIM4>,
+    pub sdram: &'static mut [f32],
+}
+
 pub struct Sitira {
     pub audio_rate: AudioRate,
     pub control_rate: ControlRate,
+    pub visual_rate: VisualRate,
 }
 
 impl Sitira {
@@ -78,6 +92,10 @@ impl Sitira {
         let syscfg_p = unsafe { pac::Peripherals::steal().SYSCFG };
 
         let mut ccdr = System::init_clocks(pwr_p, rcc_p, &syscfg_p);
+
+        // set user led to low
+        let mut seed_led = system.gpio.led;
+        seed_led.set_high().unwrap();
 
         // setting up SDRAM
         let sdram = system.sdram;
@@ -98,6 +116,15 @@ impl Sitira {
         );
 
         // graphics
+
+        // setup hardware timer for LCD update rate
+
+        let timer4_p = unsafe { pac::Peripherals::steal().TIM4 };
+        let mut timer4 =
+            stm32h7xx_hal::timer::Timer::tim4(timer4_p, ccdr.peripheral.TIM4, &mut ccdr.clocks);
+
+        timer4.set_freq(40.ms()); // 25Hz
+        timer4.listen(stm32h7xx_hal::timer::Event::TimeOut);
 
         // setting up SPI1 for ILI9431 driver
 
@@ -167,74 +194,76 @@ impl Sitira {
 
         // setting up SD Card and reading wav files
 
-        let file_name = "B.WAV";
-        let file_length_in_samples;
+        // let file_name = "A.WAV";
+        // let file_length_in_samples;
 
-        // initiate SD card connection
-        if let Ok(_) = sd.init_card(U32Ext::mhz(50)) {
-            let mut sd_card = Controller::new(sd.sdmmc_block_device(), FakeTime);
-            if let Ok(mut fat_volume) = sd_card.get_volume(VolumeIdx(0)) {
-                if let Ok(fat_root_dir) = sd_card.open_root_dir(&fat_volume) {
-                    let mut file = sd_card
-                        .open_file_in_dir(
-                            &mut fat_volume,
-                            &fat_root_dir,
-                            file_name,
-                            embedded_sdmmc::Mode::ReadOnly,
-                        )
-                        .unwrap();
+        // // initiate SD card connection
+        // if let Ok(_) = sd.init_card(U32Ext::mhz(50)) {
+        //     let mut sd_card = Controller::new(sd.sdmmc_block_device(), FakeTime);
+        //     if let Ok(mut fat_volume) = sd_card.get_volume(VolumeIdx(0)) {
+        //         if let Ok(fat_root_dir) = sd_card.open_root_dir(&fat_volume) {
+        //             let mut file = sd_card
+        //                 .open_file_in_dir(
+        //                     &mut fat_volume,
+        //                     &fat_root_dir,
+        //                     file_name,
+        //                     embedded_sdmmc::Mode::ReadOnly,
+        //                 )
+        //                 .unwrap();
 
-                    let file_length_in_bytes = file.length() as usize;
-                    file_length_in_samples = file_length_in_bytes / core::mem::size_of::<f32>();
+        //             let file_length_in_bytes = file.length() as usize;
+        //             file_length_in_samples = file_length_in_bytes / core::mem::size_of::<f32>();
 
-                    // load wave file in chunks of CHUNK_SIZE samples into sdram
+        //             // load wave file in chunks of CHUNK_SIZE samples into sdram
 
-                    lcd.draw_loading_bar(0, file_name);
+        //             lcd.draw_loading_bar(0, file_name);
 
-                    const CHUNK_SIZE: usize = 10_000; // has to be a multiple of 4, bigger chunks mean faster loading times
-                    let chunk_iterator = file_length_in_bytes / CHUNK_SIZE;
-                    file.seek_from_start(2).unwrap(); // offset the reading of the chunks
+        //             const CHUNK_SIZE: usize = 10_000; // has to be a multiple of 4, bigger chunks mean faster loading times
+        //             let chunk_iterator = file_length_in_bytes / CHUNK_SIZE;
+        //             file.seek_from_start(2).unwrap(); // offset the reading of the chunks
 
-                    for i in 0..chunk_iterator {
-                        let mut chunk_buffer = [0u8; CHUNK_SIZE];
+        //             for i in 0..chunk_iterator {
+        //                 let mut chunk_buffer = [0u8; CHUNK_SIZE];
 
-                        sd_card
-                            .read(&fat_volume, &mut file, &mut chunk_buffer)
-                            .unwrap();
+        //                 sd_card
+        //                     .read(&fat_volume, &mut file, &mut chunk_buffer)
+        //                     .unwrap();
 
-                        for k in 0..CHUNK_SIZE {
-                            // converting every word consisting of four u8 into f32 in buffer
-                            if k % 4 == 0 {
-                                let f32_buffer = [
-                                    chunk_buffer[k],
-                                    chunk_buffer[k + 1],
-                                    chunk_buffer[k + 2],
-                                    chunk_buffer[k + 3],
-                                ];
-                                let iterator = i * (CHUNK_SIZE / 4) + k / 4;
-                                sdram[iterator] = f32::from_le_bytes(f32_buffer);
-                            }
-                        }
+        //                 for k in 0..CHUNK_SIZE {
+        //                     // converting every word consisting of four u8 into f32 in buffer
+        //                     if k % 4 == 0 {
+        //                         let f32_buffer = [
+        //                             chunk_buffer[k],
+        //                             chunk_buffer[k + 1],
+        //                             chunk_buffer[k + 2],
+        //                             chunk_buffer[k + 3],
+        //                         ];
+        //                         let iterator = i * (CHUNK_SIZE / 4) + k / 4;
+        //                         sdram[iterator] = f32::from_le_bytes(f32_buffer);
+        //                     }
+        //                 }
 
-                        lcd.draw_loading_bar(
-                            ((i as f32 / chunk_iterator as f32) * 100_f32) as u32,
-                            file_name,
-                        );
-                    }
+        //                 lcd.draw_loading_bar(
+        //                     ((i as f32 / chunk_iterator as f32) * 100_f32) as u32,
+        //                     file_name,
+        //                 );
+        //             }
 
-                    sd_card.close_dir(&fat_volume, fat_root_dir);
-                } else {
-                    lcd.print_error_center(lcd.width / 2, 190, "Failed to get file!");
-                    core::panic!();
-                }
-            } else {
-                lcd.print_error_center(lcd.width / 2, 190, "Failed to get volume 0!");
-                core::panic!();
-            }
-        } else {
-            lcd.print_error_center(lcd.width / 2, 190, "No SD card found!");
-            core::panic!();
-        }
+        //             sd_card.close_dir(&fat_volume, fat_root_dir);
+        //         } else {
+        //             lcd.print_error_center(lcd.width / 2, 190, "Failed to get file!");
+        //             core::panic!();
+        //         }
+        //     } else {
+        //         lcd.print_error_center(lcd.width / 2, 190, "Failed to get volume 0!");
+        //         core::panic!();
+        //     }
+        // } else {
+        //     lcd.print_error_center(lcd.width / 2, 190, "No SD card found!");
+        //     core::panic!();
+        // }
+
+        lcd.clear();
 
         // setup TIM2
 
@@ -274,7 +303,8 @@ impl Sitira {
             .take()
             .expect("Failed to get pin 27 of the daisy!")
             .into_pull_up_input();
-        let switch1 = hid::Switch::new(switch1_pin, hid::SwitchType::PullUp);
+        let mut switch1 = hid::Switch::new(switch1_pin, hid::SwitchType::PullUp);
+        switch1.set_held_thresh(Some(2));
 
         let switch2_pin = system
             .gpio
@@ -282,7 +312,8 @@ impl Sitira {
             .take()
             .expect("Failed to get pin 28 of the daisy!")
             .into_pull_up_input();
-        let switch2 = hid::Switch::new(switch2_pin, hid::SwitchType::PullUp);
+        let mut switch2 = hid::Switch::new(switch2_pin, hid::SwitchType::PullUp);
+        switch2.set_held_thresh(Some(2));
 
         // setup LEDs
 
@@ -339,7 +370,7 @@ impl Sitira {
             .daisy14
             .take()
             .expect("Failed to get pin 14 of the daisy!")
-            .into_pull_up_input();
+            .into_pull_down_input();
 
         let rotary_clock_pin = system
             .gpio
@@ -362,14 +393,14 @@ impl Sitira {
 
         let buffer = [(0.0, 0.0); audio::BLOCK_SIZE_MAX]; // audio ring buffer
 
+        seed_led.set_low().unwrap();
+
         Self {
             audio_rate: AudioRate {
                 audio: system.audio,
                 buffer,
             },
             control_rate: ControlRate {
-                sdram,
-                file_length_in_samples,
                 adc1,
                 timer2: system.timer2,
                 pot1,
@@ -380,6 +411,7 @@ impl Sitira {
                 switch2,
                 encoder,
             },
+            visual_rate: VisualRate { lcd, timer4, sdram },
         }
     }
 }
