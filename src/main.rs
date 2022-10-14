@@ -21,6 +21,9 @@ mod app {
     use granulator::Granulator;
     use libdaisy::prelude::*;
 
+    #[cfg(feature = "log")]
+    use rtt_target::rprintln;
+
     #[shared]
     struct Shared {
         granulator: Granulator,
