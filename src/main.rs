@@ -4,9 +4,11 @@
 pub mod encoder;
 pub mod lcd;
 pub mod rgbled;
+pub mod sd_card;
 pub mod sitira;
 
 pub const CONTROL_RATE_IN_MS: u32 = 10;
+pub const LCD_REFRESH_RATE_IN_MS: u32 = 50;
 pub const RECORD_SIZE: usize = 0x2000000;
 
 #[rtic::app(
