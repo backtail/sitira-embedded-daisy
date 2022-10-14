@@ -22,11 +22,8 @@ pub type Led2 =
 pub type Switch1 = hid::Switch<Daisy27<Input<PullUp>>>;
 pub type Switch2 = hid::Switch<Daisy28<Input<PullUp>>>;
 
-pub type Encoder = encoder::RotaryEncoder<
-    Daisy14<Input<PullDown>>,
-    Daisy25<Input<PullUp>>,
-    Daisy26<Input<PullUp>>,
->;
+pub type Encoder =
+    encoder::RotaryEncoder<Daisy13<Input<PullUp>>, Daisy25<Input<PullUp>>, Daisy26<Input<PullUp>>>;
 
 pub type Display = lcd::Lcd<
     Spi<SPI1, Enabled>,
@@ -281,10 +278,10 @@ impl Sitira {
 
         let rotary_switch_pin = system
             .gpio
-            .daisy14
+            .daisy13
             .take()
-            .expect("Failed to get pin 14 of the daisy!")
-            .into_pull_down_input();
+            .expect("Failed to get pin 13 of the daisy!")
+            .into_pull_up_input();
 
         let rotary_clock_pin = system
             .gpio
@@ -300,8 +297,9 @@ impl Sitira {
             .expect("Failed to get pin 26 of the daisy!")
             .into_pull_up_input();
 
-        let encoder =
+        let mut encoder =
             encoder::RotaryEncoder::new(rotary_switch_pin, rotary_clock_pin, rotary_data_pin);
+        encoder.switch.set_held_thresh(Some(2));
 
         // audio stuff
 

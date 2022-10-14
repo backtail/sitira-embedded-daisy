@@ -38,6 +38,7 @@ where
     pub fn update(&mut self) {
         self.clock.update();
         self.data.update();
+        self.switch.update();
 
         let current_clock_state: bool;
         let current_data_state: bool;
