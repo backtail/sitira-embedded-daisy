@@ -55,7 +55,7 @@ mod app {
         // init logging via RTT
         #[cfg(feature = "log")]
         {
-            rprintln!("LOL");
+            rprintln!("RTT loggging initiated!");
         }
         // create the granulator object
         let mut granulator = Granulator::new(libdaisy::AUDIO_SAMPLE_RATE);
