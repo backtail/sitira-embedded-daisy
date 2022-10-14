@@ -16,8 +16,6 @@ use micromath::F32Ext;
 
 pub struct Lcd<SPI, DC, CS, RESET> {
     driver: Ili9341<SPIInterface<SPI, DC, CS>, RESET>,
-    pub width: usize,
-    pub height: usize,
 }
 
 impl<SPI, DC, CS, RESET> Lcd<SPI, DC, CS, RESET>
@@ -42,14 +40,7 @@ where
         )
         .unwrap();
 
-        let width = driver.width();
-        let height = driver.width();
-
-        Self {
-            driver,
-            width,
-            height,
-        }
+        Self { driver }
     }
 
     pub fn clear(&mut self) {
