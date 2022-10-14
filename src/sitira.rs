@@ -1,4 +1,4 @@
-use embedded_sdmmc::{Controller, TimeSource, Timestamp, VolumeIdx};
+// use embedded_sdmmc::{Controller, TimeSource, Timestamp, VolumeIdx};
 
 use libdaisy::prelude::*;
 use libdaisy::{audio, gpio::*, hid, sdmmc, system::System};
@@ -36,20 +36,20 @@ pub type Display = lcd::Lcd<
     Daisy16<Output<PushPull>>,
 >;
 
-struct FakeTime;
+// struct FakeTime;
 
-impl TimeSource for FakeTime {
-    fn get_timestamp(&self) -> Timestamp {
-        Timestamp {
-            year_since_1970: 52, //2022
-            zero_indexed_month: 0,
-            zero_indexed_day: 0,
-            hours: 0,
-            minutes: 0,
-            seconds: 1,
-        }
-    }
-}
+// impl TimeSource for FakeTime {
+//     fn get_timestamp(&self) -> Timestamp {
+//         Timestamp {
+//             year_since_1970: 52, //2022
+//             zero_indexed_month: 0,
+//             zero_indexed_day: 0,
+//             hours: 0,
+//             minutes: 0,
+//             seconds: 1,
+//         }
+//     }
+// }
 
 pub struct AudioRate {
     pub audio: audio::Audio,
@@ -74,13 +74,13 @@ pub struct ControlRate {
 pub struct VisualRate {
     pub lcd: Display,
     pub timer4: Timer<stm32::TIM4>,
-    pub sdram: &'static mut [f32],
 }
 
 pub struct Sitira {
     pub audio_rate: AudioRate,
     pub control_rate: ControlRate,
     pub visual_rate: VisualRate,
+    pub sdram: &'static mut [f32],
 }
 
 impl Sitira {
@@ -103,7 +103,7 @@ impl Sitira {
 
         // setting up SD card connection
         let sdmmc_d = unsafe { pac::Peripherals::steal().SDMMC1 };
-        let mut sd = sdmmc::init(
+        let mut _sd = sdmmc::init(
             system.gpio.daisy1.unwrap(),
             system.gpio.daisy2.unwrap(),
             system.gpio.daisy3.unwrap(),
@@ -123,7 +123,7 @@ impl Sitira {
         let mut timer4 =
             stm32h7xx_hal::timer::Timer::tim4(timer4_p, ccdr.peripheral.TIM4, &mut ccdr.clocks);
 
-        timer4.set_freq(40.ms()); // 25Hz
+        timer4.set_freq(30.ms()); // 25Hz
         timer4.listen(stm32h7xx_hal::timer::Event::TimeOut);
 
         // setting up SPI1 for ILI9431 driver
@@ -251,15 +251,15 @@ impl Sitira {
 
         //             sd_card.close_dir(&fat_volume, fat_root_dir);
         //         } else {
-        //             lcd.print_error_center(lcd.width / 2, 190, "Failed to get file!");
+        //             lcd.print_on_screen(lcd.width / 2, 190, "Failed to get file!");
         //             core::panic!();
         //         }
         //     } else {
-        //         lcd.print_error_center(lcd.width / 2, 190, "Failed to get volume 0!");
+        //         lcd.print_on_screen(lcd.width / 2, 190, "Failed to get volume 0!");
         //         core::panic!();
         //     }
         // } else {
-        //     lcd.print_error_center(lcd.width / 2, 190, "No SD card found!");
+        //     lcd.print_on_screen(lcd.width / 2, 190, "No SD card found!");
         //     core::panic!();
         // }
 
@@ -411,7 +411,8 @@ impl Sitira {
                 switch2,
                 encoder,
             },
-            visual_rate: VisualRate { lcd, timer4, sdram },
+            visual_rate: VisualRate { lcd, timer4 },
+            sdram,
         }
     }
 }

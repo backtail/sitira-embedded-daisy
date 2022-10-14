@@ -72,6 +72,24 @@ where
             .unwrap();
     }
 
+    pub fn clear_subsection(&mut self, area: Rectangle) {
+        area.into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
+            .draw(&mut self.driver)
+            .unwrap();
+    }
+
+    pub fn fill_subsection_with_corners(
+        &mut self,
+        top_left: Point,
+        bottom_right: Point,
+        color: Rgb565,
+    ) {
+        Rectangle::with_corners(top_left, bottom_right)
+            .into_styled(PrimitiveStyle::with_fill(color))
+            .draw(&mut self.driver)
+            .unwrap();
+    }
+
     pub fn draw_waveform(&mut self, audio_slice: &[f32]) {
         const WAVE_WIDTH: usize = 320;
         const WAVE_Y_OFFSET: i32 = 120;
@@ -196,14 +214,18 @@ where
         }
     }
 
-    pub fn print_error_center(&mut self, x: usize, y: usize, message: &str) {
+    pub fn print_on_screen(&mut self, x: usize, y: usize, message: &str) -> Rectangle {
         let character_style = MonoTextStyle::new(&ascii::FONT_6X9, Rgb565::WHITE);
 
         let position = Point::new(x as i32, y as i32);
 
-        Text::with_alignment(message, position, character_style, Alignment::Center)
-            .draw(&mut self.driver)
-            .unwrap();
+        let text = Text::new(message, position, character_style);
+
+        let bounding_box = text.bounding_box();
+
+        text.draw(&mut self.driver).unwrap();
+
+        bounding_box
     }
 }
 
