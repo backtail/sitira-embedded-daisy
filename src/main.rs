@@ -1,6 +1,7 @@
 #![no_main]
 #![no_std]
 
+pub mod binary_input;
 pub mod encoder;
 pub mod lcd;
 pub mod rgbled;
@@ -116,16 +117,25 @@ mod app {
         let led1 = &mut ctx.local.cr.led1;
         let led2 = &mut ctx.local.cr.led2;
 
-        if gate1.is_low().unwrap() || gate3.is_low().unwrap() {
+        if gate1.is_high() || gate3.is_high() {
             led1.set_high().unwrap();
         } else {
             led1.set_low().unwrap();
         }
 
-        if gate2.is_low().unwrap() || gate4.is_low().unwrap() {
+        if gate2.is_high() || gate4.is_high() {
             led2.set_high().unwrap();
         } else {
             led2.set_low().unwrap();
+        }
+
+        let button = &mut ctx.local.cr.button;
+        let led3 = &mut ctx.local.cr.led3;
+
+        if button.is_high() {
+            led3.set_high().unwrap();
+        } else {
+            led3.set_low().unwrap();
         }
 
         let granulator = &mut ctx.shared.granulator;

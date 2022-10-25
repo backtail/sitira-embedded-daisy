@@ -8,6 +8,7 @@ use stm32h7xx_hal::time::U32Ext;
 use stm32h7xx_hal::timer::Timer;
 use stm32h7xx_hal::{adc, pac, stm32};
 
+use crate::binary_input::*;
 use crate::encoder;
 use crate::lcd;
 // use crate::sd_card::{self, SdCard};
@@ -30,18 +31,18 @@ pub type MuxSelect2 = Daisy19<Output<PushPull>>;
 
 pub type AnalogRead = f32;
 
-pub type Gate1 = Daisy24<Input<Floating>>;
-pub type Gate2 = Daisy25<Input<Floating>>;
-pub type Gate3 = Daisy22<Input<Floating>>;
-pub type Gate4 = Daisy23<Input<Floating>>;
+pub type Gate1 = BinaryInput<Daisy24<Input<Floating>>>;
+pub type Gate2 = BinaryInput<Daisy25<Input<Floating>>>;
+pub type Gate3 = BinaryInput<Daisy22<Input<Floating>>>;
+pub type Gate4 = BinaryInput<Daisy23<Input<Floating>>>;
 
-pub type KillGate = Daisy20<Input<Floating>>;
+pub type KillGate = BinaryInput<Daisy20<Input<Floating>>>;
 
 pub type Led1 = Daisy13<Output<PushPull>>;
 pub type Led2 = Daisy14<Output<PushPull>>;
 pub type Led3 = Daisy0<Output<PushPull>>;
 
-pub type ButtonSwitch = hid::Switch<Daisy9<Input<Floating>>>;
+pub type ButtonSwitch = BinaryInput<Daisy9<Input<PullDown>>>;
 
 pub type Encoder = encoder::RotaryEncoder<
     Daisy28<Input<Floating>>,
@@ -283,40 +284,47 @@ impl Sitira {
         // CONFIG GATE INPUTS
         // ==================
 
-        let gate1 = system
+        let gate1_pin = system
             .gpio
             .daisy24
             .take()
             .expect("Failed to get pin 24 of the daisy!")
             .into_floating_input();
+        let gate1 = BinaryInput::new(gate1_pin, InputType::ActiveLow);
 
-        let gate2 = system
+        let gate2_pin = system
             .gpio
             .daisy25
             .take()
             .expect("Failed to get pin 25 of the daisy!")
             .into_floating_input();
+        let gate2 = BinaryInput::new(gate2_pin, InputType::ActiveLow);
 
-        let gate3 = system
+        let gate3_pin = system
             .gpio
             .daisy22
             .take()
             .expect("Failed to get pin 22 of the daisy!")
             .into_floating_input();
+        let gate3 = BinaryInput::new(gate3_pin, InputType::ActiveLow);
 
-        let gate4 = system
+        let gate4_pin = system
             .gpio
             .daisy23
             .take()
             .expect("Failed to get pin 23 of the daisy!")
             .into_floating_input();
 
-        let kill_gate = system
+        let gate4 = BinaryInput::new(gate4_pin, InputType::ActiveLow);
+
+        let kill_gate_pin = system
             .gpio
             .daisy20
             .take()
             .expect("Failed to get pin 20 of the daisy!")
             .into_floating_input();
+
+        let kill_gate = BinaryInput::new(kill_gate_pin, InputType::ActiveLow);
 
         // ===========
         // CONFIG LEDs
@@ -355,11 +363,9 @@ impl Sitira {
             .daisy9
             .take()
             .expect("Failed to get pin 9 of the daisy!")
-            .into_floating_input();
+            .into_pull_down_input();
 
-        let button = hid::Switch::new(button_pin, hid::SwitchType::PullUp);
-        // button.set_held_thresh(Some(2));
-        // button.set_double_thresh(Some(5));
+        let button = BinaryInput::new(button_pin, InputType::ActiveHigh);
 
         // ===============
         // CONFIG FINISHED
