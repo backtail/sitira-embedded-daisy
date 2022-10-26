@@ -9,6 +9,7 @@ use stm32h7xx_hal::timer::Timer;
 use stm32h7xx_hal::{adc, pac, stm32};
 
 use crate::binary_input::*;
+use crate::dual_mux_4051;
 use crate::encoder;
 use crate::lcd;
 // use crate::sd_card::{self, SdCard};
@@ -21,15 +22,16 @@ use crate::{CONTROL_RATE_IN_MS, LCD_REFRESH_RATE_IN_MS};
 /// Not multiplexed
 pub type MasterVolume = hid::AnalogControl<Daisy21<Analog>>;
 /// MUX A+B
-pub type MuxInput1 = Daisy15<Input<Analog>>;
+pub type MuxInput1 = Daisy15<Analog>;
 /// MUX C+D
-pub type MuxInput2 = Daisy16<Input<Analog>>;
+pub type MuxInput2 = Daisy16<Analog>;
 
 pub type MuxSelect0 = Daisy17<Output<PushPull>>;
 pub type MuxSelect1 = Daisy18<Output<PushPull>>;
 pub type MuxSelect2 = Daisy19<Output<PushPull>>;
 
-pub type AnalogRead = f32;
+pub type AnalogRead =
+    dual_mux_4051::DualMux<MuxInput1, MuxInput2, MuxSelect0, MuxSelect1, MuxSelect2>;
 
 pub type Gate1 = BinaryInput<Daisy24<Input<Floating>>>;
 pub type Gate2 = BinaryInput<Daisy25<Input<Floating>>>;
@@ -57,6 +59,22 @@ pub type Display = lcd::Lcd<
     Daisy7<Output<PushPull>>,
 >;
 
+pub enum AdcMuxInputs {
+    Offset = 0,
+    GrainSize = 1,
+    Pitch = 2,
+    PitchSpread = 4,
+    OffsetSpread = 5,
+    GrainSizeSpread = 7,
+    Delay = 8,
+    ActiveGrains = 9,
+    Envelope = 10,
+    Velocity = 12,
+    DelaySpread = 13,
+    WaveSelect = 14,
+    VelocitySpread = 15,
+}
+
 pub struct AudioRate {
     pub audio: audio::Audio,
     pub buffer: audio::AudioBuffer,
@@ -64,7 +82,6 @@ pub struct AudioRate {
 
 pub struct ControlRate {
     // HAL
-    pub adc1: adc::Adc<stm32::ADC1, adc::Enabled>,
     pub timer2: Timer<stm32::TIM2>,
 
     // Analog inputs
@@ -235,9 +252,49 @@ impl Sitira {
         // CONFIG ANALOG READING
         // =====================
 
-        let mut adc1 = system.adc1.enable();
-        adc1.set_resolution(adc::Resolution::SIXTEENBIT);
-        let _adc1_max_value = adc1.max_sample() as f32;
+        let mux1_pin = system
+            .gpio
+            .daisy15
+            .take()
+            .expect("Failed to get pin 15 of the daisy!")
+            .into_analog();
+
+        let mux2_pin = system
+            .gpio
+            .daisy16
+            .take()
+            .expect("Failed to get pin 16 of the daisy!")
+            .into_analog();
+
+        let select0_pin = system
+            .gpio
+            .daisy17
+            .take()
+            .expect("Failed to get pin 17 of the daisy!")
+            .into_push_pull_output();
+
+        let select1_pin = system
+            .gpio
+            .daisy18
+            .take()
+            .expect("Failed to get pin 18 of the daisy!")
+            .into_push_pull_output();
+
+        let select2_pin = system
+            .gpio
+            .daisy19
+            .take()
+            .expect("Failed to get pin 19 of the daisy!")
+            .into_push_pull_output();
+
+        let muxed_parameters = dual_mux_4051::DualMux::new(
+            system.adc1,
+            mux1_pin,
+            mux2_pin,
+            select0_pin,
+            select1_pin,
+            select2_pin,
+        );
 
         let mut adc2 = system.adc2.enable();
         adc2.set_resolution(adc::Resolution::SIXTEENBIT);
@@ -379,10 +436,9 @@ impl Sitira {
                 buffer: [(0.0, 0.0); audio::BLOCK_SIZE_MAX],
             },
             control_rate: ControlRate {
-                adc1,
                 timer2: system.timer2,
                 master_volume,
-                muxed_parameters: 0.0, // placeholder
+                muxed_parameters,
                 gate1,
                 gate2,
                 gate3,
