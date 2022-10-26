@@ -1,10 +1,13 @@
 use core::fmt::Debug;
-use stm32h7xx_hal::adc::{Adc, Disabled, Enabled};
+use nb::block;
+use stm32h7xx_hal::adc::{Adc, AdcSampleTime, Disabled, Enabled, Resolution};
 use stm32h7xx_hal::hal::adc::Channel;
 use stm32h7xx_hal::hal::digital::v2::OutputPin;
 use stm32h7xx_hal::stm32;
 
 const MUX_INPUTS: usize = 8;
+
+const ONE_BIT_MASK: u8 = 0b1;
 
 pub struct DualMux<M1, M2, S0, S1, S2> {
     // HAL
@@ -44,7 +47,9 @@ where
         select2_pin: S2,
     ) -> Self {
         // enable ADC
-        let adc = adc.enable();
+        let mut adc = adc.enable();
+        adc.set_resolution(Resolution::SIXTEENBIT);
+        adc.set_sample_time(AdcSampleTime::T_64);
         let conversion_value = 1.0 / adc.max_sample() as f32;
 
         DualMux {
@@ -62,14 +67,45 @@ where
         }
     }
 
-    pub fn read_value(&mut self, input_number: usize) {
-        match input_number {
-            0..=8 => self.adc.start_conversion(&mut self.mux1_pin),
-            9..=16 => self.adc.start_conversion(&mut self.mux2_pin),
+    fn set_select_pins(&mut self, input_number: usize) {
+        let input_number = input_number.clamp(0, 15) as u8;
+        let first_bit = input_number & ONE_BIT_MASK;
+        let second_bit = (input_number >> 1) & ONE_BIT_MASK;
+        let third_bit = (input_number >> 2) & ONE_BIT_MASK;
+
+        match first_bit {
+            0b0 => self.select0_pin.set_low().unwrap(),
+            0b1 => self.select0_pin.set_high().unwrap(),
             _ => (),
         }
 
-        if let Ok(data) = self.adc.read_sample() {
+        match second_bit {
+            0b0 => self.select1_pin.set_low().unwrap(),
+            0b1 => self.select1_pin.set_high().unwrap(),
+            _ => (),
+        }
+
+        match third_bit {
+            0b0 => self.select2_pin.set_low().unwrap(),
+            0b1 => self.select2_pin.set_high().unwrap(),
+            _ => (),
+        }
+    }
+
+    pub fn read_value(&mut self, input_number: usize) {
+        match input_number {
+            0..=8 => {
+                self.set_select_pins(input_number);
+                self.adc.start_conversion(&mut self.mux1_pin);
+            }
+            9..=16 => {
+                self.set_select_pins(input_number);
+                self.adc.start_conversion(&mut self.mux2_pin);
+            }
+            _ => (),
+        }
+
+        if let Ok(data) = block!(self.adc.read_sample()) {
             self.value[input_number] = data as f32 * self.conversion_value;
         }
     }
