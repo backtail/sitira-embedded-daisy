@@ -1,19 +1,23 @@
 use libdaisy::prelude::*;
 use libdaisy::{audio, gpio::*, hid, sdmmc, system::System};
 
-use stm32h7xx_hal::gpio::Floating;
-use stm32h7xx_hal::spi::{Enabled, Mode, Spi};
-use stm32h7xx_hal::stm32::SPI1;
-use stm32h7xx_hal::time::U32Ext;
-use stm32h7xx_hal::timer::Timer;
-use stm32h7xx_hal::{adc, pac, stm32};
+use stm32h7xx_hal::{adc, gpio, pac, spi, stm32, timer};
 
 use crate::binary_input::*;
 use crate::dual_mux_4051;
 use crate::encoder;
 use crate::lcd;
-// use crate::sd_card::{self, SdCard};
+use crate::rprintln;
+use crate::sd_card::{self, SdCard};
 use crate::{CONTROL_RATE_IN_MS, LCD_REFRESH_RATE_IN_MS};
+
+#[macro_export]
+macro_rules! rprintln {
+    ($($rest:tt)*) => {
+        #[cfg(feature = "log")]
+        rtt_target::rprintln!($($rest)*)
+    }
+}
 
 // ===================
 // PIN TYPE DEFINITION
@@ -33,12 +37,12 @@ pub type MuxSelect2 = Daisy19<Output<PushPull>>;
 pub type AnalogRead =
     dual_mux_4051::DualMux<MuxInput1, MuxInput2, MuxSelect0, MuxSelect1, MuxSelect2>;
 
-pub type Gate1 = BinaryInput<Daisy24<Input<Floating>>>;
-pub type Gate2 = BinaryInput<Daisy25<Input<Floating>>>;
-pub type Gate3 = BinaryInput<Daisy22<Input<Floating>>>;
-pub type Gate4 = BinaryInput<Daisy23<Input<Floating>>>;
+pub type Gate1 = BinaryInput<Daisy24<Input<gpio::Floating>>>;
+pub type Gate2 = BinaryInput<Daisy25<Input<gpio::Floating>>>;
+pub type Gate3 = BinaryInput<Daisy22<Input<gpio::Floating>>>;
+pub type Gate4 = BinaryInput<Daisy23<Input<gpio::Floating>>>;
 
-pub type KillGate = BinaryInput<Daisy20<Input<Floating>>>;
+pub type KillGate = BinaryInput<Daisy20<Input<gpio::Floating>>>;
 
 pub type Led1 = Daisy13<Output<PushPull>>;
 pub type Led2 = Daisy14<Output<PushPull>>;
@@ -47,13 +51,13 @@ pub type Led3 = Daisy0<Output<PushPull>>;
 pub type ButtonSwitch = BinaryInput<Daisy9<Input<PullDown>>>;
 
 pub type Encoder = encoder::RotaryEncoder<
-    Daisy28<Input<Floating>>,
+    Daisy28<Input<gpio::Floating>>,
     Daisy26<Input<PullUp>>,
     Daisy27<Input<PullUp>>,
 >;
 
 pub type Display = lcd::Lcd<
-    Spi<SPI1, Enabled>,
+    spi::Spi<stm32::SPI1, spi::Enabled>,
     Daisy11<Output<PushPull>>,
     Daisy12<Output<PushPull>>,
     Daisy7<Output<PushPull>>,
@@ -82,7 +86,8 @@ pub struct AudioRate {
 
 pub struct ControlRate {
     // HAL
-    pub timer2: Timer<stm32::TIM2>,
+    pub timer2: timer::Timer<stm32::TIM2>,
+    pub adc2: adc::Adc<stm32::ADC2, adc::Enabled>,
 
     // Analog inputs
     pub master_volume: MasterVolume,
@@ -108,7 +113,7 @@ pub struct ControlRate {
 
 pub struct VisualRate {
     pub lcd: Display,
-    pub timer4: Timer<stm32::TIM4>,
+    pub timer4: timer::Timer<stm32::TIM4>,
 }
 
 pub struct Sitira {
@@ -116,7 +121,7 @@ pub struct Sitira {
     pub control_rate: ControlRate,
     pub visual_rate: VisualRate,
     pub sdram: &'static mut [f32],
-    // pub sd_card: SdCard,
+    pub sd_card: Option<SdCard>,
 }
 
 impl Sitira {
@@ -142,6 +147,10 @@ impl Sitira {
 
         let mut ccdr = System::init_clocks(pwr_p, rcc_p, &syscfg_p);
 
+        // enable logger
+        libdaisy::logger::init();
+        rprintln!("RTT loggging initiated!");
+
         // set high for system config
         let mut seed_led = system.gpio.led;
         seed_led.set_high().unwrap();
@@ -152,6 +161,7 @@ impl Sitira {
 
         let sdram = system.sdram;
         sdram.fill(0.0);
+        rprintln!("SDRAM initiated!");
 
         // =========================
         // CONFIG SD CARD CONNECTION
@@ -159,7 +169,7 @@ impl Sitira {
 
         // setting up SD card connection
         let sdmmc_d = unsafe { pac::Peripherals::steal().SDMMC1 };
-        let _sd = sdmmc::init(
+        let sd = sdmmc::init(
             system.gpio.daisy1.unwrap(),
             system.gpio.daisy2.unwrap(),
             system.gpio.daisy3.unwrap(),
@@ -171,13 +181,21 @@ impl Sitira {
             &mut ccdr.clocks,
         );
 
-        // let sd_card = sd_card::SdCard::new(sd);
+        let sd_card;
+
+        if sd.card().is_ok() {
+            sd_card = Some(sd_card::SdCard::new(sd));
+        } else {
+            sd_card = None;
+            rprintln!("Didn't grab the SD card!");
+        }
 
         // =============
         // CONFIG TIMERS
         // =============
 
         system.timer2.set_freq(CONTROL_RATE_IN_MS.ms());
+        rprintln!("Set control rate timer to {} ms!", CONTROL_RATE_IN_MS);
 
         // Delay Timer
         let timer3 = unsafe { pac::Peripherals::steal().TIM3 }.timer(
@@ -188,11 +206,11 @@ impl Sitira {
         let delay = stm32h7xx_hal::delay::DelayFromCountDownTimer::new(timer3);
 
         let timer4_p = unsafe { pac::Peripherals::steal().TIM4 };
-        let mut timer4 =
-            stm32h7xx_hal::timer::Timer::tim4(timer4_p, ccdr.peripheral.TIM4, &mut ccdr.clocks);
+        let mut timer4 = timer::Timer::tim4(timer4_p, ccdr.peripheral.TIM4, &mut ccdr.clocks);
 
         timer4.set_freq(LCD_REFRESH_RATE_IN_MS.ms());
         timer4.listen(stm32h7xx_hal::timer::Event::TimeOut);
+        rprintln!("Set visual rate timer to {} ms!", LCD_REFRESH_RATE_IN_MS);
 
         // ===========================
         // CONFIG LCD DRIVER (ILI9431)
@@ -231,7 +249,7 @@ impl Sitira {
             .expect("Failed to get pin 7 of the daisy!")
             .into_push_pull_output();
 
-        let mode = Mode {
+        let mode = spi::Mode {
             polarity: stm32h7xx_hal::spi::Polarity::IdleLow,
             phase: stm32h7xx_hal::spi::Phase::CaptureOnFirstTransition,
         };
@@ -239,7 +257,7 @@ impl Sitira {
         let lcd_spi = unsafe { pac::Peripherals::steal().SPI1 }.spi(
             (lcd_clk, lcd_miso, lcd_mosi),
             mode,
-            U32Ext::mhz(25),
+            25.mhz(),
             ccdr.peripheral.SPI1,
             &ccdr.clocks,
         );
@@ -247,6 +265,8 @@ impl Sitira {
         let mut lcd = lcd::Lcd::new(lcd_spi, lcd_dc, lcd_cs, lcd_reset, delay);
 
         lcd.setup();
+
+        rprintln!("Initiated LCD screen!");
 
         // =====================
         // CONFIG ANALOG READING
@@ -296,8 +316,11 @@ impl Sitira {
             select2_pin,
         );
 
+        rprintln!("Initiated ADC1 reading (dual 4051 mux)!");
+
         let mut adc2 = system.adc2.enable();
         adc2.set_resolution(adc::Resolution::SIXTEENBIT);
+        adc2.set_sample_time(adc::AdcSampleTime::T_387);
         let adc2_max_value = adc2.max_sample() as f32;
 
         let master_volume_pin = system
@@ -307,6 +330,8 @@ impl Sitira {
             .expect("Failed to get pin 13 of the daisy!")
             .into_analog();
         let master_volume = hid::AnalogControl::new(master_volume_pin, adc2_max_value);
+
+        rprintln!("Initiated ADC2 reading!");
 
         // ==============
         // CONFIG ENCODER
@@ -336,6 +361,8 @@ impl Sitira {
         let mut encoder =
             encoder::RotaryEncoder::new(rotary_switch_pin, rotary_clock_pin, rotary_data_pin);
         encoder.switch.set_held_thresh(Some(2));
+
+        rprintln!("Initiated encoder!");
 
         // ==================
         // CONFIG GATE INPUTS
@@ -383,6 +410,8 @@ impl Sitira {
 
         let kill_gate = BinaryInput::new(kill_gate_pin, InputType::ActiveLow);
 
+        rprintln!("Initiated gate inputs!");
+
         // ===========
         // CONFIG LEDs
         // ===========
@@ -411,6 +440,8 @@ impl Sitira {
             .into_push_pull_output();
         led3.set_low().unwrap();
 
+        rprintln!("Initiated LEDs!");
+
         // =============
         // CONFIG BUTTON
         // =============
@@ -424,11 +455,14 @@ impl Sitira {
 
         let button = BinaryInput::new(button_pin, InputType::ActiveHigh);
 
+        rprintln!("Initiated button input!");
+
         // ===============
         // CONFIG FINISHED
         // ===============
 
         seed_led.set_low().unwrap();
+        rprintln!("Sitira hardware platform is now fully setup!");
 
         Self {
             audio_rate: AudioRate {
@@ -437,6 +471,7 @@ impl Sitira {
             },
             control_rate: ControlRate {
                 timer2: system.timer2,
+                adc2,
                 master_volume,
                 muxed_parameters,
                 gate1,
@@ -453,7 +488,7 @@ impl Sitira {
             },
             visual_rate: VisualRate { lcd, timer4 },
             sdram,
-            // sd_card,
+            sd_card,
         }
     }
 }

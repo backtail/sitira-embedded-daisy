@@ -23,11 +23,12 @@ mod app {
         CONTROL_RATE_IN_MS,
     };
     use granulator::{Granulator, GranulatorParameter};
+    use stm32h7xx_hal::prelude::_embedded_hal_adc_OneShot;
 
     use libdaisy::prelude::*;
 
-    #[cfg(feature = "log")]
-    use rtt_target::rprintln;
+    #[allow(unused_imports)]
+    use crate::rprintln;
 
     #[shared]
     struct Shared {
@@ -47,18 +48,10 @@ mod app {
         // initiate system
         let sitira = Sitira::init(ctx.core, ctx.device);
 
-        libdaisy::logger::init();
-
-        // init logging via RTT
-        #[cfg(feature = "log")]
-        {
-            rprintln!("RTT loggging initiated!");
-        }
         // create the granulator object
         let mut granulator = Granulator::new(libdaisy::AUDIO_SAMPLE_RATE);
 
         // set master volume to 1.0
-        // granulator.set_master_volume(1.0);
         granulator.set_parameter(GranulatorParameter::MasterVolume, 1.0);
 
         // activate timer 4 interrupt
@@ -106,7 +99,7 @@ mod app {
     }
 
     // read values from pot 2 and switch 2 of daisy pod
-    #[task(binds = TIM2, local = [cr], shared = [granulator])]
+    #[task(binds = TIM2, local = [cr], shared = [granulator], priority = 3)]
     fn update_handler(mut ctx: update_handler::Context) {
         // clear TIM2 interrupt flag
         ctx.local.cr.timer2.clear_irq();
@@ -133,76 +126,102 @@ mod app {
         let button = &mut ctx.local.cr.button;
         let led3 = &mut ctx.local.cr.led3;
 
-        if button.is_high() {
+        let encoder = &mut ctx.local.cr.encoder;
+        encoder.update();
+        encoder.switch.update();
+
+        if button.is_high() || encoder.switch.is_held() {
             led3.set_high().unwrap();
         } else {
             led3.set_low().unwrap();
         }
-
-        let granulator = &mut ctx.shared.granulator;
 
         let adc_values = &mut ctx.local.cr.muxed_parameters;
         for i in 0..16 {
             adc_values.read_value(i);
         }
 
-        #[cfg(feature = "log")]
-        {
-            rprintln!("ADC{}: {:.4} ", 0, adc_values.get_value(0));
+        let adc2 = &mut ctx.local.cr.adc2;
+        let master_volume = &mut ctx.local.cr.master_volume;
+
+        if let Ok(data) = adc2.read(master_volume.get_pin()) {
+            master_volume.update(data);
+            rprintln!("{}", master_volume.get_value());
         }
 
-        // update the scheduler
+        let granulator = &mut ctx.shared.granulator;
+
+        // each parameter needs a dedicated lock
+        granulator.lock(|g| {
+            g.set_parameter(GranulatorParameter::MasterVolume, master_volume.get_value());
+        });
         granulator.lock(|g| {
             g.set_parameter(
                 GranulatorParameter::ActiveGrains,
                 adc_values.get_value(AdcMuxInputs::ActiveGrains as usize),
             );
+        });
+        granulator.lock(|g| {
             g.set_parameter(
                 GranulatorParameter::Delay,
                 adc_values.get_value(AdcMuxInputs::Delay as usize),
             );
+        });
+        granulator.lock(|g| {
             g.set_parameter(
                 GranulatorParameter::DelaySpread,
                 adc_values.get_value(AdcMuxInputs::DelaySpread as usize),
             );
+        });
+        granulator.lock(|g| {
             g.set_parameter(
                 GranulatorParameter::GrainSize,
                 adc_values.get_value(AdcMuxInputs::GrainSize as usize),
             );
+        });
+        granulator.lock(|g| {
             g.set_parameter(
                 GranulatorParameter::GrainSizeSpread,
                 adc_values.get_value(AdcMuxInputs::GrainSizeSpread as usize),
             );
-            // g.set_parameter(
-            //     GranulatorParameter::MasterVolume,
-            //     MasterVolume,
-            // );
+        });
+        granulator.lock(|g| {
             g.set_parameter(
                 GranulatorParameter::Offset,
                 adc_values.get_value(AdcMuxInputs::Offset as usize),
             );
+        });
+        granulator.lock(|g| {
             g.set_parameter(
                 GranulatorParameter::OffsetSpread,
                 adc_values.get_value(AdcMuxInputs::OffsetSpread as usize),
             );
+        });
+        granulator.lock(|g| {
             g.set_parameter(
                 GranulatorParameter::Pitch,
                 adc_values.get_value(AdcMuxInputs::Pitch as usize),
             );
+        });
+        granulator.lock(|g| {
             g.set_parameter(
                 GranulatorParameter::PitchSpread,
                 adc_values.get_value(AdcMuxInputs::PitchSpread as usize),
             );
+        });
+        granulator.lock(|g| {
             g.set_parameter(
                 GranulatorParameter::Velocity,
                 adc_values.get_value(AdcMuxInputs::Velocity as usize),
             );
+        });
+        granulator.lock(|g| {
             g.set_parameter(
                 GranulatorParameter::VelocitySpread,
                 adc_values.get_value(AdcMuxInputs::VelocitySpread as usize),
             );
-
-            // update scheduler
+        });
+        granulator.lock(|g| {
             g.update_scheduler(core::time::Duration::from_millis(CONTROL_RATE_IN_MS as u64));
         });
     }
