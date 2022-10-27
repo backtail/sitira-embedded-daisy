@@ -7,6 +7,7 @@ use stm32h7xx_hal::{
 };
 
 use crate::lcd::Lcd;
+use crate::rprintln;
 
 struct FakeTime;
 
@@ -42,13 +43,16 @@ impl SdCard {
                         fat_root_dir,
                     }
                 } else {
-                    core::panic!();
+                    rprintln!("Couldn't open root directory!");
+                    panic!();
                 }
             } else {
-                core::panic!();
+                rprintln!("Couldn't grad volume 0!");
+                panic!();
             }
         } else {
-            core::panic!();
+            rprintln!("Couldn't init sd card!");
+            panic!();
         }
     }
 
