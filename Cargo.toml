@@ -13,12 +13,13 @@ stm32h7xx-hal = { version = "0.11.0", features = [ "stm32h750v", "rt", "revision
 panic-halt = "0.2.0"
 libdaisy = { path = "libdaisy-rust"}
 granulator = { path = "granulator", features = ["no_std"]}
-embedded-sdmmc = "0.3.0"
+# embedded-sdmmc = "0.3.0"
 display-interface-spi = "0.4.1"
 embedded-graphics = "0.7.1"
 ili9341 = "0.5.0"
 micromath = "2.0.0"
 nb = "1.0.0"
+usbd-audio = "0.1.0"
 
 # For debug purposes
 rtt-target = { version = "0.3.0", features = ["cortex-m"], optional = true}

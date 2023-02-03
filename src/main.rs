@@ -6,7 +6,7 @@ pub mod dual_mux_4051;
 pub mod encoder;
 pub mod lcd;
 pub mod rgbled;
-pub mod sd_card;
+// pub mod sd_card;
 pub mod sitira;
 
 pub const CONTROL_RATE_IN_MS: u32 = 30;
@@ -54,10 +54,10 @@ mod app {
         let sitira = Sitira::init(ctx.core, ctx.device);
 
         // create the granulator object
-        let mut granulator = Granulator::new(libdaisy::AUDIO_SAMPLE_RATE);
+        let granulator = Granulator::new(libdaisy::AUDIO_SAMPLE_RATE);
 
         // set master volume to 1.0
-        granulator.set_parameter(GranulatorParameter::MasterVolume, 1.0);
+        // granulator.set_parameter(GranulatorParameter::MasterVolume, 1.0);
 
         // activate timer 4 interrupt
         rtic::pend(stm32h7xx_hal::interrupt::TIM4);
@@ -216,6 +216,10 @@ mod app {
             }
         }
 
+        // ----------------------------------
+        // USER SETTINGS
+        // ----------------------------------
+
         for i in 0..16 {
             adc_values.read_value(i);
         }
@@ -224,75 +228,23 @@ mod app {
             master_volume.update(data);
         }
 
-        granulator.lock(|g| {
-            g.set_parameter(GranulatorParameter::MasterVolume, master_volume.get_value());
-        });
-        granulator.lock(|g| {
-            g.set_parameter(
-                GranulatorParameter::ActiveGrains,
-                adc_values.get_value(AdcMuxInputs::ActiveGrains as usize),
-            );
-        });
-        granulator.lock(|g| {
-            g.set_parameter(
-                GranulatorParameter::Delay,
-                adc_values.get_value(AdcMuxInputs::Delay as usize),
-            );
-        });
-        granulator.lock(|g| {
-            g.set_parameter(
-                GranulatorParameter::DelaySpread,
-                adc_values.get_value(AdcMuxInputs::DelaySpread as usize),
-            );
-        });
-        granulator.lock(|g| {
-            g.set_parameter(
-                GranulatorParameter::GrainSize,
-                adc_values.get_value(AdcMuxInputs::GrainSize as usize),
-            );
-        });
-        granulator.lock(|g| {
-            g.set_parameter(
-                GranulatorParameter::GrainSizeSpread,
-                adc_values.get_value(AdcMuxInputs::GrainSizeSpread as usize),
-            );
-        });
-        granulator.lock(|g| {
-            g.set_parameter(
-                GranulatorParameter::Offset,
-                adc_values.get_value(AdcMuxInputs::Offset as usize),
-            );
-        });
-        granulator.lock(|g| {
-            g.set_parameter(
-                GranulatorParameter::OffsetSpread,
-                adc_values.get_value(AdcMuxInputs::OffsetSpread as usize),
-            );
-        });
-        granulator.lock(|g| {
-            g.set_parameter(
-                GranulatorParameter::Pitch,
-                adc_values.get_value(AdcMuxInputs::Pitch as usize),
-            );
-        });
-        granulator.lock(|g| {
-            g.set_parameter(
-                GranulatorParameter::PitchSpread,
-                adc_values.get_value(AdcMuxInputs::PitchSpread as usize),
-            );
-        });
-        granulator.lock(|g| {
-            g.set_parameter(
-                GranulatorParameter::Velocity,
-                adc_values.get_value(AdcMuxInputs::Velocity as usize),
-            );
-        });
-        granulator.lock(|g| {
-            g.set_parameter(
-                GranulatorParameter::VelocitySpread,
-                adc_values.get_value(AdcMuxInputs::VelocitySpread as usize),
-            );
-        });
+        let parameter_array = [
+            master_volume.get_value(),
+            adc_values.get_value(AdcMuxInputs::ActiveGrains as usize),
+            adc_values.get_value(AdcMuxInputs::Offset as usize),
+            adc_values.get_value(AdcMuxInputs::GrainSize as usize),
+            adc_values.get_value(AdcMuxInputs::Pitch as usize),
+            adc_values.get_value(AdcMuxInputs::Delay as usize),
+            adc_values.get_value(AdcMuxInputs::Velocity as usize),
+            adc_values.get_value(AdcMuxInputs::OffsetSpread as usize),
+            adc_values.get_value(AdcMuxInputs::GrainSizeSpread as usize),
+            adc_values.get_value(AdcMuxInputs::PitchSpread as usize),
+            adc_values.get_value(AdcMuxInputs::VelocitySpread as usize),
+            adc_values.get_value(AdcMuxInputs::DelaySpread as usize),
+        ];
+
+        GranulatorParameter::update_all(parameter_array);
+
         granulator.lock(|g| {
             g.update_scheduler(core::time::Duration::from_millis(CONTROL_RATE_IN_MS as u64));
         });

@@ -1,14 +1,18 @@
 use libdaisy::prelude::*;
-use libdaisy::{audio, gpio::*, hid, sdmmc, system::System};
+use libdaisy::{audio, gpio::*, hid, system::System};
+// use libdaisy::sdmmc;
 
+// use stm32h7xx_hal::usb_hs::{UsbBus, USB1};
 use stm32h7xx_hal::{adc, gpio, pac, spi, stm32, timer};
+
+// use usbd_audio::{AudioClassBuilder, Format, StreamConfig, TerminalType};
 
 use crate::binary_input::*;
 use crate::dual_mux_4051;
 use crate::encoder;
 use crate::lcd;
 use crate::rprintln;
-use crate::sd_card::{self, SdCard};
+// use crate::sd_card::{self, SdCard};
 use crate::{CONTROL_RATE_IN_MS, LCD_REFRESH_RATE_IN_MS};
 
 #[macro_export]
@@ -121,7 +125,7 @@ pub struct Sitira {
     pub control_rate: ControlRate,
     pub visual_rate: VisualRate,
     pub sdram: &'static mut [f32],
-    pub sd_card: Option<SdCard>,
+    // pub sd_card: Option<SdCard>,
 }
 
 impl Sitira {
@@ -151,6 +155,58 @@ impl Sitira {
         libdaisy::logger::init();
         rprintln!("RTT loggging initiated!");
 
+        // // Test USB OTG
+        // let pac = pac::Peripherals::take().unwrap();
+        // static mut USB_MEMORY: [u32; 256] = [0_u32; 256];
+
+        // let pin_dm = system
+        //     .gpio
+        //     .daisy29
+        //     .take()
+        //     .expect("Failed to get pin 29 of the daisy!")
+        //     .into_alternate_af12();
+
+        // let pin_dp = system
+        //     .gpio
+        //     .daisy30
+        //     .take()
+        //     .expect("Failed to get pin 29 of the daisy!")
+        //     .into_alternate_af12();
+
+        // let usb1 = USB1::new(
+        //     pac.OTG1_HS_GLOBAL,
+        //     pac.OTG1_HS_DEVICE,
+        //     pac.OTG1_HS_PWRCLK,
+        //     pin_dm,
+        //     pin_dp,
+        //     ccdr.peripheral.USB1OTG,
+        //     &mut ccdr.clocks,
+        // );
+
+        // let usb_bus = UsbBus::new(usb1, unsafe { &mut USB_MEMORY });
+
+        // let usb_audio = AudioClassBuilder::new()
+        //     .input(
+        //         StreamConfig::new_discrete(
+        //             Format::S24le,
+        //             2,
+        //             &[48000],
+        //             TerminalType::InDesktopMicrophone,
+        //         )
+        //         .unwrap(),
+        //     )
+        //     .output(
+        //         StreamConfig::new_discrete(
+        //             Format::S24le,
+        //             2,
+        //             &[48000],
+        //             TerminalType::OutDesktopSpeaker,
+        //         )
+        //         .unwrap(),
+        //     )
+        //     .build(&usb_bus)
+        //     .unwrap();
+
         // set high for system config
         let mut seed_led = system.gpio.led;
         seed_led.set_high().unwrap();
@@ -167,28 +223,28 @@ impl Sitira {
         // CONFIG SD CARD CONNECTION
         // =========================
 
-        // setting up SD card connection
-        let sdmmc_d = unsafe { pac::Peripherals::steal().SDMMC1 };
-        let sd = sdmmc::init(
-            system.gpio.daisy1.unwrap(),
-            system.gpio.daisy2.unwrap(),
-            system.gpio.daisy3.unwrap(),
-            system.gpio.daisy4.unwrap(),
-            system.gpio.daisy5.unwrap(),
-            system.gpio.daisy6.unwrap(),
-            sdmmc_d,
-            ccdr.peripheral.SDMMC1,
-            &mut ccdr.clocks,
-        );
+        // // setting up SD card connection
+        // let sdmmc_d = unsafe { pac::Peripherals::steal().SDMMC1 };
+        // let sd = sdmmc::init(
+        //     system.gpio.daisy1.unwrap(),
+        //     system.gpio.daisy2.unwrap(),
+        //     system.gpio.daisy3.unwrap(),
+        //     system.gpio.daisy4.unwrap(),
+        //     system.gpio.daisy5.unwrap(),
+        //     system.gpio.daisy6.unwrap(),
+        //     sdmmc_d,
+        //     ccdr.peripheral.SDMMC1,
+        //     &mut ccdr.clocks,
+        // );
 
-        let sd_card;
+        // let sd_card;
 
-        if sd.card().is_ok() {
-            sd_card = Some(sd_card::SdCard::new(sd));
-        } else {
-            sd_card = None;
-            rprintln!("Didn't grab the SD card!");
-        }
+        // if sd.card().is_ok() {
+        //     sd_card = Some(sd_card::SdCard::new(sd));
+        // } else {
+        // sd_card = None;
+        //     rprintln!("Didn't grab the SD card!");
+        // }
 
         // =============
         // CONFIG TIMERS
@@ -488,7 +544,7 @@ impl Sitira {
             },
             visual_rate: VisualRate { lcd, timer4 },
             sdram,
-            sd_card,
+            // sd_card,
         }
     }
 }
