@@ -16,23 +16,28 @@ pub mod sitira;
 )]
 mod app {
     use crate::{
-        config::*,
         sdram,
         sitira::{AdcMuxInputs, AudioRate, ControlRate, Sitira, VisualRate},
     };
 
-    use granulator::{Granulator, GranulatorParameter};
+    use granulator::{Granulator, ModeType, ScaleType, UserSettings, WindowFunction};
     use stm32h7xx_hal::prelude::_embedded_hal_adc_OneShot;
 
     use libdaisy::prelude::OutputPin;
 
-    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use core::{
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+        time::Duration,
+    };
 
     #[allow(unused_imports)]
     use crate::rprintln;
 
     #[shared]
-    struct Shared {}
+    struct Shared {
+        audio_buffer: &'static [f32],
+        user_settings: granulator::UserSettings,
+    }
 
     #[local]
     struct Local {
@@ -44,7 +49,9 @@ mod app {
     }
 
     static SOURCE_LENGTH: AtomicUsize = AtomicUsize::new(0);
-    static IS_RECORDING: AtomicBool = AtomicBool::new(false);
+    static IS_RECORDING: AtomicBool = AtomicBool::new(true);
+    const AUDIO_CALLBACK_INTERVAL: f32 =
+        libdaisy::AUDIO_BLOCK_SIZE as f32 * (1.0 / (libdaisy::AUDIO_SAMPLE_RATE as f32));
 
     #[init]
     fn init(ctx: init::Context) -> (Shared, Local, init::Monotonics) {
@@ -57,8 +64,30 @@ mod app {
         // activate timer 4 interrupt
         rtic::pend(stm32h7xx_hal::interrupt::TIM4);
 
+        rprintln!("I am here!");
+
         (
-            Shared {},
+            Shared {
+                audio_buffer: sdram::get_slice(0, 1).unwrap(), // mock slice
+                user_settings: UserSettings {
+                    master_volume: 1.0,
+                    active_grains: 0.1,
+                    offset: 0.5,
+                    grain_size: 0.5,
+                    pitch: 0.5,
+                    delay: 0.0,
+                    velocity: 1.0,
+                    sp_offset: 0.0,
+                    sp_grain_size: 0.0,
+                    sp_pitch: 0.0,
+                    sp_delay: 0.0,
+                    sp_velocity: 0.0,
+                    window_function: WindowFunction::Sine as u8,
+                    window_param: 0.5,
+                    scale: ScaleType::Diatonic as u8,
+                    mode: ModeType::Ionian as u8,
+                },
+            },
             Local {
                 ar: sitira.audio_rate,
                 cr: sitira.control_rate,
@@ -80,21 +109,38 @@ mod app {
     }
 
     // Interrupt handler for audio
-    #[task(binds = DMA1_STR1, local = [ar, sdram], priority = 8)]
-    fn audio_handler(ctx: audio_handler::Context) {
+    #[task(binds = DMA1_STR1, local = [ar, sdram, granulator], shared = [user_settings, audio_buffer], priority = 8)]
+    fn audio_handler(mut ctx: audio_handler::Context) {
         let audio = &mut ctx.local.ar.audio;
         let mut buffer = ctx.local.ar.buffer;
+        let granulator = ctx.local.granulator;
+        let sdram = ctx.local.sdram;
 
         audio.get_stereo(&mut buffer);
+
+        // update scheduler
+        granulator.update_scheduler(Duration::from_secs_f32(AUDIO_CALLBACK_INTERVAL));
 
         let is_recording = IS_RECORDING.load(Ordering::Relaxed);
 
         // when recording
         if is_recording {
-            let sdram = ctx.local.sdram;
             let source_length = SOURCE_LENGTH.load(Ordering::Relaxed);
 
             if source_length < sdram::SDRAM_SIZE {
+                // store incomong audio in memory
+                for (index, (right, left)) in buffer.iter().enumerate() {
+                    sdram[source_length + index] = *right;
+                    audio.push_stereo((*right, *left)).unwrap();
+                }
+
+                // update source length by buffer size of one channel
+                SOURCE_LENGTH.fetch_add(buffer.len(), Ordering::Relaxed);
+            } else {
+                // wrap around the SDRAM when overflowing
+                SOURCE_LENGTH.store(0, Ordering::Relaxed);
+
+                // store incomong audio in memory
                 for (index, (right, left)) in buffer.iter().enumerate() {
                     sdram[source_length + index] = *right;
                     audio.push_stereo((*right, *left)).unwrap();
@@ -105,17 +151,31 @@ mod app {
 
         // when playing
         if !is_recording {
+            // set audio buffer
+            let source_length = SOURCE_LENGTH.load(Ordering::Relaxed);
+            granulator.set_audio_buffer(&sdram[0..source_length]);
+
+            // update user settings
+            ctx.shared
+                .user_settings
+                .lock(|settings| granulator.update_all_user_settings(settings));
+
             for _ in buffer {
-                let mono_sample = granulator::get_next_sample();
+                // get next sample
+                let mono_sample = granulator.get_next_sample();
                 audio.push_stereo((mono_sample, mono_sample)).unwrap();
             }
         }
     }
 
-    #[task(binds = TIM2, local = [cr, granulator], priority = 3)]
-    fn update_handler(ctx: update_handler::Context) {
+    #[task(binds = TIM2, local = [cr], shared = [user_settings], priority = 3)]
+    fn update_handler(mut ctx: update_handler::Context) {
         // clear TIM2 interrupt flag
         ctx.local.cr.timer2.clear_irq();
+
+        // ----------------------------------
+        // BUTTON, GATE INs AND LEDs
+        // ----------------------------------
 
         // LEDs
         let led1 = &mut ctx.local.cr.led1;
@@ -128,14 +188,6 @@ mod app {
         let gate2 = &mut ctx.local.cr.gate2;
         let gate3 = &mut ctx.local.cr.gate3;
         let gate4 = &mut ctx.local.cr.gate4;
-
-        // adc related
-        let adc_values = &mut ctx.local.cr.muxed_parameters;
-        let adc2 = &mut ctx.local.cr.adc2;
-        let master_volume = &mut ctx.local.cr.master_volume;
-
-        // audio related
-        let granulator = ctx.local.granulator;
 
         // save all binary inputs at the beginning
         button.save_state();
@@ -162,66 +214,66 @@ mod app {
 
         match IS_RECORDING.load(Ordering::Relaxed) {
             true => {
-                led3.set_high().unwrap();
-
                 if button.is_triggered() {
                     rprintln!("Started recording incoming audio!");
-                    granulator.remove_audio_buffer();
                     SOURCE_LENGTH.store(0, Ordering::Relaxed);
                 }
+
+                led3.set_high().unwrap();
             }
 
             false => {
-                led3.set_low().unwrap();
-
                 if button.is_triggered() {
                     rprintln!("Stopped recording incoming audio!");
-
-                    if let Some(audio_buffer) =
-                        sdram::get_slice::<f32>(0, SOURCE_LENGTH.load(Ordering::Relaxed))
-                    {
-                        granulator.set_audio_buffer(audio_buffer);
-                        rprintln!(
-                            "Audio buffer gets set with length of {} samples!",
-                            SOURCE_LENGTH.load(Ordering::Relaxed)
-                        );
-                    } else {
-                        rprintln!("Audio buffer doesn't fit into SDRAM, abort sample loading!");
-                    }
+                    rprintln!(
+                        "Audio buffer gets set with length of {} samples!",
+                        SOURCE_LENGTH.load(Ordering::Relaxed)
+                    );
                 }
+
+                led3.set_low().unwrap();
             }
         }
+
+        // can probably be spilt into two different task, since reading the ADCs needs more fine tuning
 
         // ----------------------------------
         // USER SETTINGS
         // ----------------------------------
 
+        let adc_values = &mut ctx.local.cr.muxed_parameters;
+        let adc2 = &mut ctx.local.cr.adc2;
+        let master_volume = &mut ctx.local.cr.master_volume;
+
+        // read from ADC2
         for i in 0..16 {
             adc_values.read_value(i);
         }
 
+        // read from ADC1
         if let Ok(data) = adc2.read(master_volume.get_pin()) {
             master_volume.update(data);
         }
 
-        let parameter_array = [
-            master_volume.get_value(),
-            adc_values.get_value(AdcMuxInputs::ActiveGrains as usize),
-            adc_values.get_value(AdcMuxInputs::Offset as usize),
-            adc_values.get_value(AdcMuxInputs::GrainSize as usize),
-            adc_values.get_value(AdcMuxInputs::Pitch as usize),
-            adc_values.get_value(AdcMuxInputs::Delay as usize),
-            adc_values.get_value(AdcMuxInputs::Velocity as usize),
-            adc_values.get_value(AdcMuxInputs::OffsetSpread as usize),
-            adc_values.get_value(AdcMuxInputs::GrainSizeSpread as usize),
-            adc_values.get_value(AdcMuxInputs::PitchSpread as usize),
-            adc_values.get_value(AdcMuxInputs::VelocitySpread as usize),
-            adc_values.get_value(AdcMuxInputs::DelaySpread as usize),
-        ];
-
-        GranulatorParameter::update_all(parameter_array);
-
-        granulator.update_scheduler(core::time::Duration::from_millis(CONTROL_RATE_IN_MS as u64));
+        let window_function = (adc_values.get_value(AdcMuxInputs::Envelope as usize) * 6.0) as u8;
+        rprintln!("Window Function: {}", window_function);
+        // update user settings
+        ctx.shared.user_settings.lock(|settings| {
+            settings.master_volume = master_volume.get_value();
+            settings.active_grains = adc_values.get_value(AdcMuxInputs::ActiveGrains as usize);
+            settings.offset = adc_values.get_value(AdcMuxInputs::Offset as usize);
+            settings.grain_size = adc_values.get_value(AdcMuxInputs::GrainSize as usize);
+            settings.pitch = adc_values.get_value(AdcMuxInputs::Pitch as usize);
+            settings.delay = adc_values.get_value(AdcMuxInputs::Delay as usize);
+            settings.velocity = adc_values.get_value(AdcMuxInputs::Velocity as usize);
+            settings.sp_offset = adc_values.get_value(AdcMuxInputs::OffsetSpread as usize);
+            settings.sp_grain_size = adc_values.get_value(AdcMuxInputs::GrainSizeSpread as usize);
+            settings.sp_pitch = adc_values.get_value(AdcMuxInputs::PitchSpread as usize);
+            settings.sp_velocity = adc_values.get_value(AdcMuxInputs::VelocitySpread as usize);
+            settings.sp_delay = adc_values.get_value(AdcMuxInputs::DelaySpread as usize);
+            settings.window_function = window_function;
+            // settings.window_param = adc_values.get_value(AdcMuxInputs::WaveSelect as usize);
+        });
     }
 
     #[task(binds = TIM4, local = [vr], shared = [])]
