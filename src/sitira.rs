@@ -1,36 +1,82 @@
 use libdaisy::prelude::*;
-use libdaisy::{audio, gpio::*, hid, sdmmc, system::System};
+use libdaisy::{audio, gpio::*, hid, system::System};
 
-use stm32h7xx_hal::spi::{Enabled, Mode, Spi};
-use stm32h7xx_hal::stm32::SPI1;
-use stm32h7xx_hal::time::U32Ext;
-use stm32h7xx_hal::timer::Timer;
-use stm32h7xx_hal::{adc, pac, stm32};
+use stm32h7xx_hal::{adc, gpio, pac, spi, stm32, timer};
 
+use crate::binary_input::*;
+use crate::config::*;
+use crate::dual_mux_4051;
 use crate::encoder;
 use crate::lcd;
-use crate::rgbled::*;
-use crate::sd_card::{self, SdCard};
-use crate::{CONTROL_RATE_IN_MS, LCD_REFRESH_RATE_IN_MS};
+use crate::rprintln;
 
-pub type Pot1 = hid::AnalogControl<Daisy21<Analog>>;
-pub type Pot2 = hid::AnalogControl<Daisy15<Analog>>;
-pub type Led1 =
-    RGBLed<Daisy20<Output<PushPull>>, Daisy19<Output<PushPull>>, Daisy18<Output<PushPull>>>;
-pub type Led2 =
-    RGBLed<Daisy17<Output<PushPull>>, Daisy24<Output<PushPull>>, Daisy23<Output<PushPull>>>;
-pub type Switch1 = hid::Switch<Daisy27<Input<PullUp>>>;
-pub type Switch2 = hid::Switch<Daisy28<Input<PullUp>>>;
+#[macro_export]
+macro_rules! rprintln {
+    ($($rest:tt)*) => {
+        #[cfg(feature = "log")]
+        rtt_target::rprintln!($($rest)*)
+    }
+}
 
-pub type Encoder =
-    encoder::RotaryEncoder<Daisy13<Input<PullUp>>, Daisy25<Input<PullUp>>, Daisy26<Input<PullUp>>>;
+// ===================
+// PIN TYPE DEFINITION
+// ===================
+
+/// Not multiplexed
+pub type MasterVolume = hid::AnalogControl<Daisy21<Analog>>;
+/// MUX A+B
+pub type MuxInput1 = Daisy15<Analog>;
+/// MUX C+D
+pub type MuxInput2 = Daisy16<Analog>;
+
+pub type MuxSelect0 = Daisy17<Output<PushPull>>;
+pub type MuxSelect1 = Daisy18<Output<PushPull>>;
+pub type MuxSelect2 = Daisy19<Output<PushPull>>;
+
+pub type AnalogRead =
+    dual_mux_4051::DualMux<MuxInput1, MuxInput2, MuxSelect0, MuxSelect1, MuxSelect2>;
+
+pub type Gate1 = BinaryInput<Daisy24<Input<gpio::Floating>>>;
+pub type Gate2 = BinaryInput<Daisy25<Input<gpio::Floating>>>;
+pub type Gate3 = BinaryInput<Daisy22<Input<gpio::Floating>>>;
+pub type Gate4 = BinaryInput<Daisy23<Input<gpio::Floating>>>;
+
+pub type KillGate = BinaryInput<Daisy20<Input<gpio::Floating>>>;
+
+pub type Led1 = Daisy13<Output<PushPull>>;
+pub type Led2 = Daisy14<Output<PushPull>>;
+pub type Led3 = Daisy0<Output<PushPull>>;
+
+pub type ButtonSwitch = BinaryInput<Daisy9<Input<PullDown>>>;
+
+pub type Encoder = encoder::RotaryEncoder<
+    Daisy28<Input<gpio::Floating>>,
+    Daisy26<Input<PullUp>>,
+    Daisy27<Input<PullUp>>,
+>;
 
 pub type Display = lcd::Lcd<
-    Spi<SPI1, Enabled>,
+    spi::Spi<stm32::SPI1, spi::Enabled>,
     Daisy11<Output<PushPull>>,
     Daisy12<Output<PushPull>>,
-    Daisy16<Output<PushPull>>,
+    Daisy7<Output<PushPull>>,
 >;
+
+pub enum AdcMuxInputs {
+    Offset = 0,
+    GrainSize = 1,
+    Pitch = 2,
+    PitchSpread = 4,
+    OffsetSpread = 5,
+    GrainSizeSpread = 7,
+    Delay = 8,
+    ActiveGrains = 9,
+    Envelope = 10,
+    Velocity = 12,
+    DelaySpread = 13,
+    WaveSelect = 14,
+    VelocitySpread = 15,
+}
 
 pub struct AudioRate {
     pub audio: audio::Audio,
@@ -39,22 +85,34 @@ pub struct AudioRate {
 
 pub struct ControlRate {
     // HAL
-    pub adc1: adc::Adc<stm32::ADC1, adc::Enabled>,
-    pub timer2: Timer<stm32::TIM2>,
+    pub timer2: timer::Timer<stm32::TIM2>,
+    pub adc2: adc::Adc<stm32::ADC2, adc::Enabled>,
 
-    // Libdaisy
-    pub pot1: Pot1,
-    pub pot2: Pot2,
+    // Analog inputs
+    pub master_volume: MasterVolume,
+    pub muxed_parameters: AnalogRead,
+
+    // Gates
+    pub gate1: Gate1,
+    pub gate2: Gate2,
+    pub gate3: Gate3,
+    pub gate4: Gate4,
+    pub kill_gate: KillGate,
+
+    // LEDs
     pub led1: Led1,
     pub led2: Led2,
-    pub switch1: Switch1,
-    pub switch2: Switch2,
+    pub led3: Led3,
+    pub seed_led: SeedLed,
+
+    // Switches
+    pub button: ButtonSwitch,
     pub encoder: Encoder,
 }
 
 pub struct VisualRate {
     pub lcd: Display,
-    pub timer4: Timer<stm32::TIM4>,
+    pub timer4: timer::Timer<stm32::TIM4>,
 }
 
 pub struct Sitira {
@@ -62,11 +120,24 @@ pub struct Sitira {
     pub control_rate: ControlRate,
     pub visual_rate: VisualRate,
     pub sdram: &'static mut [f32],
-    pub sd_card: SdCard,
+    // pub sd_card: Option<SdCard>,
 }
 
 impl Sitira {
+    /**
+    Initializes the Daisy Seed for the Sitira platform. Automatically sets up all necessary peripherals:
+    - SAI1/I²C (I²S Audio Codec/Configuration)
+    - FMC (SDRAM Controller)
+    - TIM2/TIM3/TIM4 (Internal Timing for Interrupts)
+    - ADC1 (Analog Input Reading)
+    - SPI1 (LCD Driver)
+    - SDMMC1 (SD Card Controller)
+    */
     pub fn init(core: rtic::export::Peripherals, device: stm32::Peripherals) -> Self {
+        // ===========
+        // SYSTEM INIT
+        // ===========
+
         let mut system = System::init(core, device);
 
         let rcc_p = unsafe { pac::Peripherals::steal().RCC };
@@ -75,54 +146,47 @@ impl Sitira {
 
         let mut ccdr = System::init_clocks(pwr_p, rcc_p, &syscfg_p);
 
-        // set user led to low
+        // enable logger
+        libdaisy::logger::init();
+        rprintln!("RTT loggging initiated!");
+
+        // set high for system config
         let mut seed_led = system.gpio.led;
         seed_led.set_high().unwrap();
 
-        // setting up SDRAM
+        // ============
+        // CONFIG SDRAM
+        // ============
+
         let sdram = system.sdram;
         sdram.fill(0.0);
+        rprintln!("SDRAM initiated!");
 
-        // setting up SD card connection
-        let sdmmc_d = unsafe { pac::Peripherals::steal().SDMMC1 };
-        let sd = sdmmc::init(
-            system.gpio.daisy1.unwrap(),
-            system.gpio.daisy2.unwrap(),
-            system.gpio.daisy3.unwrap(),
-            system.gpio.daisy4.unwrap(),
-            system.gpio.daisy5.unwrap(),
-            system.gpio.daisy6.unwrap(),
-            sdmmc_d,
-            ccdr.peripheral.SDMMC1,
-            &mut ccdr.clocks,
-        );
-
-        let sd_card = sd_card::SdCard::new(sd);
-
-        // setup TIM2
+        // =============
+        // CONFIG TIMERS
+        // =============
 
         system.timer2.set_freq(CONTROL_RATE_IN_MS.ms());
+        rprintln!("Set control rate timer to {} ms!", CONTROL_RATE_IN_MS);
 
-        // graphics
-
-        // setup hardware timer for LCD update rate
+        // Delay Timer
+        let timer3 = unsafe { pac::Peripherals::steal().TIM3 }.timer(
+            1.ms(),
+            ccdr.peripheral.TIM3,
+            &ccdr.clocks,
+        );
+        let delay = stm32h7xx_hal::delay::DelayFromCountDownTimer::new(timer3);
 
         let timer4_p = unsafe { pac::Peripherals::steal().TIM4 };
-        let mut timer4 =
-            stm32h7xx_hal::timer::Timer::tim4(timer4_p, ccdr.peripheral.TIM4, &mut ccdr.clocks);
+        let mut timer4 = timer::Timer::tim4(timer4_p, ccdr.peripheral.TIM4, &mut ccdr.clocks);
 
-        timer4.set_freq(LCD_REFRESH_RATE_IN_MS.ms()); // 25Hz
+        timer4.set_freq(LCD_REFRESH_RATE_IN_MS.ms());
         timer4.listen(stm32h7xx_hal::timer::Event::TimeOut);
+        rprintln!("Set visual rate timer to {} ms!", LCD_REFRESH_RATE_IN_MS);
 
-        // setting up SPI1 for ILI9431 driver
-
-        let mut lcd_nss = system
-            .gpio
-            .daisy7
-            .expect("Failed to get pin 7 of the daisy!")
-            .into_push_pull_output();
-
-        lcd_nss.set_high().unwrap();
+        // ===========================
+        // CONFIG LCD DRIVER (ILI9431)
+        // ===========================
 
         let lcd_clk = system
             .gpio
@@ -150,13 +214,14 @@ impl Sitira {
             .expect("Failed to get pin 12 of the daisy!")
             .into_push_pull_output();
 
+        // dummy pin
         let lcd_reset = system
             .gpio
-            .daisy16
-            .expect("Failed to get pin 16 of the daisy!")
+            .daisy7
+            .expect("Failed to get pin 7 of the daisy!")
             .into_push_pull_output();
 
-        let mode = Mode {
+        let mode = spi::Mode {
             polarity: stm32h7xx_hal::spi::Polarity::IdleLow,
             phase: stm32h7xx_hal::spi::Phase::CaptureOnFirstTransition,
         };
@@ -164,168 +229,238 @@ impl Sitira {
         let lcd_spi = unsafe { pac::Peripherals::steal().SPI1 }.spi(
             (lcd_clk, lcd_miso, lcd_mosi),
             mode,
-            U32Ext::mhz(25),
+            25.mhz(),
             ccdr.peripheral.SPI1,
             &ccdr.clocks,
         );
-
-        let timer3 = unsafe { pac::Peripherals::steal().TIM3 }.timer(
-            1.ms(),
-            ccdr.peripheral.TIM3,
-            &ccdr.clocks,
-        );
-        let delay = stm32h7xx_hal::delay::DelayFromCountDownTimer::new(timer3);
 
         let mut lcd = lcd::Lcd::new(lcd_spi, lcd_dc, lcd_cs, lcd_reset, delay);
 
         lcd.setup();
 
-        // Setup ADC1
+        rprintln!("Initiated LCD screen!");
 
-        let mut adc1 = system.adc1.enable();
-        adc1.set_resolution(adc::Resolution::SIXTEENBIT);
-        let adc1_max_value = adc1.max_sample() as f32;
+        // =====================
+        // CONFIG ANALOG READING
+        // =====================
 
-        // setup analog reads from potentiometer
-
-        let pot1_pin = system
-            .gpio
-            .daisy21
-            .take()
-            .expect("Failed to get pin 21 of the daisy!")
-            .into_analog();
-
-        let pot1 = hid::AnalogControl::new(pot1_pin, adc1_max_value);
-
-        let pot2_pin = system
+        let mux1_pin = system
             .gpio
             .daisy15
             .take()
             .expect("Failed to get pin 15 of the daisy!")
             .into_analog();
 
-        let pot2 = hid::AnalogControl::new(pot2_pin, adc1_max_value);
-
-        // setting up tactil switches
-
-        let switch1_pin = system
+        let mux2_pin = system
             .gpio
-            .daisy27
+            .daisy16
             .take()
-            .expect("Failed to get pin 27 of the daisy!")
-            .into_pull_up_input();
-        let mut switch1 = hid::Switch::new(switch1_pin, hid::SwitchType::PullUp);
-        switch1.set_held_thresh(Some(2));
+            .expect("Failed to get pin 16 of the daisy!")
+            .into_analog();
 
-        let switch2_pin = system
-            .gpio
-            .daisy28
-            .take()
-            .expect("Failed to get pin 28 of the daisy!")
-            .into_pull_up_input();
-        let mut switch2 = hid::Switch::new(switch2_pin, hid::SwitchType::PullUp);
-        switch2.set_held_thresh(Some(2));
-
-        // setup LEDs
-
-        let led1_red = system
-            .gpio
-            .daisy20
-            .take()
-            .expect("Failed to get pin 20 of the daisy!")
-            .into_push_pull_output();
-
-        let led1_green = system
-            .gpio
-            .daisy19
-            .take()
-            .expect("Failed to get pin 19 of the daisy!")
-            .into_push_pull_output();
-
-        let led1_blue = system
-            .gpio
-            .daisy18
-            .take()
-            .expect("Failed to get pin 18 of the daisy!")
-            .into_push_pull_output();
-
-        let led1 = RGBLed::new(led1_red, led1_green, led1_blue, LEDConfig::ActiveLow, 1000);
-
-        let led2_red = system
+        let select0_pin = system
             .gpio
             .daisy17
             .take()
             .expect("Failed to get pin 17 of the daisy!")
             .into_push_pull_output();
 
-        let led2_green = system
+        let select1_pin = system
             .gpio
-            .daisy24
+            .daisy18
             .take()
-            .expect("Failed to get pin 24 of the daisy!")
+            .expect("Failed to get pin 18 of the daisy!")
             .into_push_pull_output();
 
-        let led2_blue = system
+        let select2_pin = system
             .gpio
-            .daisy23
+            .daisy19
             .take()
-            .expect("Failed to get pin 23 of the daisy!")
+            .expect("Failed to get pin 19 of the daisy!")
             .into_push_pull_output();
 
-        let led2 = RGBLed::new(led2_red, led2_green, led2_blue, LEDConfig::ActiveLow, 1000);
+        let muxed_parameters = dual_mux_4051::DualMux::new(
+            system.adc1,
+            mux1_pin,
+            mux2_pin,
+            select0_pin,
+            select1_pin,
+            select2_pin,
+        );
 
-        // setting up rotary encoder
+        rprintln!("Initiated ADC1 reading (dual 4051 mux)!");
+
+        let mut adc2 = system.adc2.enable();
+        adc2.set_resolution(adc::Resolution::SIXTEENBIT);
+        adc2.set_sample_time(adc::AdcSampleTime::T_387);
+        let adc2_max_value = adc2.max_sample() as f32;
+
+        let master_volume_pin = system
+            .gpio
+            .daisy21
+            .take()
+            .expect("Failed to get pin 13 of the daisy!")
+            .into_analog();
+        let master_volume = hid::AnalogControl::new(master_volume_pin, adc2_max_value);
+
+        rprintln!("Initiated ADC2 reading!");
+
+        // ==============
+        // CONFIG ENCODER
+        // ==============
 
         let rotary_switch_pin = system
             .gpio
-            .daisy13
+            .daisy28
             .take()
-            .expect("Failed to get pin 13 of the daisy!")
-            .into_pull_up_input();
+            .expect("Failed to get pin 28 of the daisy!")
+            .into_floating_input();
 
         let rotary_clock_pin = system
-            .gpio
-            .daisy25
-            .take()
-            .expect("Failed to get pin 25 of the daisy!")
-            .into_pull_up_input();
-
-        let rotary_data_pin = system
             .gpio
             .daisy26
             .take()
             .expect("Failed to get pin 26 of the daisy!")
             .into_pull_up_input();
 
+        let rotary_data_pin = system
+            .gpio
+            .daisy27
+            .take()
+            .expect("Failed to get pin 27 of the daisy!")
+            .into_pull_up_input();
+
         let mut encoder =
             encoder::RotaryEncoder::new(rotary_switch_pin, rotary_clock_pin, rotary_data_pin);
         encoder.switch.set_held_thresh(Some(2));
 
-        // audio stuff
+        rprintln!("Initiated encoder!");
 
-        let buffer = [(0.0, 0.0); audio::BLOCK_SIZE_MAX]; // audio ring buffer
+        // ==================
+        // CONFIG GATE INPUTS
+        // ==================
+
+        let gate1_pin = system
+            .gpio
+            .daisy24
+            .take()
+            .expect("Failed to get pin 24 of the daisy!")
+            .into_floating_input();
+        let gate1 = BinaryInput::new(gate1_pin, InputType::ActiveLow);
+
+        let gate2_pin = system
+            .gpio
+            .daisy25
+            .take()
+            .expect("Failed to get pin 25 of the daisy!")
+            .into_floating_input();
+        let gate2 = BinaryInput::new(gate2_pin, InputType::ActiveLow);
+
+        let gate3_pin = system
+            .gpio
+            .daisy22
+            .take()
+            .expect("Failed to get pin 22 of the daisy!")
+            .into_floating_input();
+        let gate3 = BinaryInput::new(gate3_pin, InputType::ActiveLow);
+
+        let gate4_pin = system
+            .gpio
+            .daisy23
+            .take()
+            .expect("Failed to get pin 23 of the daisy!")
+            .into_floating_input();
+
+        let gate4 = BinaryInput::new(gate4_pin, InputType::ActiveLow);
+
+        let kill_gate_pin = system
+            .gpio
+            .daisy20
+            .take()
+            .expect("Failed to get pin 20 of the daisy!")
+            .into_floating_input();
+
+        let kill_gate = BinaryInput::new(kill_gate_pin, InputType::ActiveLow);
+
+        rprintln!("Initiated gate inputs!");
+
+        // ===========
+        // CONFIG LEDs
+        // ===========
+
+        let mut led1 = system
+            .gpio
+            .daisy13
+            .take()
+            .expect("Failed to get pin 13 of the daisy!")
+            .into_push_pull_output();
+        led1.set_low().unwrap();
+
+        let mut led2 = system
+            .gpio
+            .daisy14
+            .take()
+            .expect("Failed to get pin 14 of the daisy!")
+            .into_push_pull_output();
+        led2.set_low().unwrap();
+
+        let mut led3 = system
+            .gpio
+            .daisy0
+            .take()
+            .expect("Failed to get pin 0 of the daisy!")
+            .into_push_pull_output();
+        led3.set_low().unwrap();
+
+        rprintln!("Initiated LEDs!");
+
+        // =============
+        // CONFIG BUTTON
+        // =============
+
+        let button_pin = system
+            .gpio
+            .daisy9
+            .take()
+            .expect("Failed to get pin 9 of the daisy!")
+            .into_pull_down_input();
+
+        let button = BinaryInput::new(button_pin, InputType::ActiveHigh);
+
+        rprintln!("Initiated button input!");
+
+        // ===============
+        // CONFIG FINISHED
+        // ===============
 
         seed_led.set_low().unwrap();
+        rprintln!("Sitira hardware platform is now fully setup!");
 
         Self {
             audio_rate: AudioRate {
                 audio: system.audio,
-                buffer,
+                buffer: [(0.0, 0.0); audio::BLOCK_SIZE_MAX],
             },
             control_rate: ControlRate {
-                adc1,
                 timer2: system.timer2,
-                pot1,
-                pot2,
+                adc2,
+                master_volume,
+                muxed_parameters,
+                gate1,
+                gate2,
+                gate3,
+                gate4,
+                kill_gate,
                 led1,
                 led2,
-                switch1,
-                switch2,
+                led3,
+                seed_led,
+                button,
                 encoder,
             },
             visual_rate: VisualRate { lcd, timer4 },
             sdram,
-            sd_card,
+            // sd_card,
         }
     }
 }

@@ -1,15 +1,14 @@
 #![no_main]
 #![no_std]
 
+pub mod binary_input;
+pub mod config;
+pub mod dual_mux_4051;
 pub mod encoder;
 pub mod lcd;
 pub mod rgbled;
-pub mod sd_card;
+pub mod sdram;
 pub mod sitira;
-
-pub const CONTROL_RATE_IN_MS: u32 = 10;
-pub const LCD_REFRESH_RATE_IN_MS: u32 = 50;
-pub const RECORD_SIZE: usize = 0x2000000;
 
 #[rtic::app(
     device = stm32h7xx_hal::stm32,
@@ -17,23 +16,27 @@ pub const RECORD_SIZE: usize = 0x2000000;
 )]
 mod app {
     use crate::{
-        rgbled::RGBColors,
-        sitira::{AudioRate, ControlRate, Sitira, VisualRate},
-        CONTROL_RATE_IN_MS, RECORD_SIZE,
+        sdram,
+        sitira::{AdcMuxInputs, AudioRate, ControlRate, Sitira, VisualRate},
     };
-    use granulator::{Granulator, GranulatorParameter::*};
-    use libdaisy::prelude::*;
 
-    #[cfg(feature = "log")]
-    use rtt_target::rprintln;
+    use granulator::{Granulator, ModeType, ScaleType, UserSettings, WindowFunction};
+    use stm32h7xx_hal::prelude::_embedded_hal_adc_OneShot;
+
+    use libdaisy::prelude::OutputPin;
+
+    use core::{
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+        time::Duration,
+    };
+
+    #[allow(unused_imports)]
+    use crate::rprintln;
 
     #[shared]
     struct Shared {
-        granulator: Granulator,
-        recording_state_switched: bool,
-        is_recording: bool,
-        sdram: &'static mut [f32],
-        source_length: usize,
+        audio_buffer: &'static [f32],
+        user_settings: granulator::UserSettings,
     }
 
     #[local]
@@ -41,46 +44,56 @@ mod app {
         ar: AudioRate,
         cr: ControlRate,
         vr: VisualRate,
-        parameter_page: usize,
-        shift: bool,
+        sdram: &'static mut [f32],
+        granulator: Granulator,
     }
+
+    static SOURCE_LENGTH: AtomicUsize = AtomicUsize::new(0);
+    static IS_RECORDING: AtomicBool = AtomicBool::new(true);
+    const AUDIO_CALLBACK_INTERVAL: f32 =
+        libdaisy::AUDIO_BLOCK_SIZE as f32 * (1.0 / (libdaisy::AUDIO_SAMPLE_RATE as f32));
 
     #[init]
     fn init(ctx: init::Context) -> (Shared, Local, init::Monotonics) {
         // initiate system
         let sitira = Sitira::init(ctx.core, ctx.device);
 
-        libdaisy::logger::init();
-
-        // init logging via RTT
-        #[cfg(feature = "log")]
-        {
-            rprintln!("RTT loggging initiated!");
-        }
         // create the granulator object
-        let mut granulator = Granulator::new(libdaisy::AUDIO_SAMPLE_RATE);
-
-        // set master volume to 1.0
-        // granulator.set_master_volume(1.0);
-        granulator.set_parameter(MasterVolume, 1.0);
+        let granulator = Granulator::new(libdaisy::AUDIO_SAMPLE_RATE);
 
         // activate timer 4 interrupt
         rtic::pend(stm32h7xx_hal::interrupt::TIM4);
 
+        rprintln!("I am here!");
+
         (
             Shared {
-                granulator,
-                recording_state_switched: true,
-                is_recording: false,
-                sdram: sitira.sdram,
-                source_length: 0,
+                audio_buffer: sdram::get_slice(0, 1).unwrap(), // mock slice
+                user_settings: UserSettings {
+                    master_volume: 1.0,
+                    active_grains: 0.1,
+                    offset: 0.5,
+                    grain_size: 0.5,
+                    pitch: 0.5,
+                    delay: 0.0,
+                    velocity: 1.0,
+                    sp_offset: 0.0,
+                    sp_grain_size: 0.0,
+                    sp_pitch: 0.0,
+                    sp_delay: 0.0,
+                    sp_velocity: 0.0,
+                    window_function: WindowFunction::Sine as u8,
+                    window_param: 0.5,
+                    scale: ScaleType::Diatonic as u8,
+                    mode: ModeType::Ionian as u8,
+                },
             },
             Local {
                 ar: sitira.audio_rate,
                 cr: sitira.control_rate,
                 vr: sitira.visual_rate,
-                parameter_page: 0,
-                shift: false,
+                sdram: sitira.sdram,
+                granulator,
             },
             init::Monotonics(),
         )
@@ -96,213 +109,176 @@ mod app {
     }
 
     // Interrupt handler for audio
-    #[task(binds = DMA1_STR1, local = [ar], shared = [granulator, sdram, is_recording, source_length], priority = 8)]
+    #[task(binds = DMA1_STR1, local = [ar, sdram, granulator], shared = [user_settings, audio_buffer], priority = 8)]
     fn audio_handler(mut ctx: audio_handler::Context) {
         let audio = &mut ctx.local.ar.audio;
         let mut buffer = ctx.local.ar.buffer;
-
-        let mut granulator = ctx.shared.granulator;
-        let mut sdram = ctx.shared.sdram;
-        let mut is_recording = false;
-        ctx.shared.is_recording.lock(|f| is_recording = *f);
-        let mut source_length = 0;
-        ctx.shared.source_length.lock(|f| source_length = *f);
+        let granulator = ctx.local.granulator;
+        let sdram = ctx.local.sdram;
 
         audio.get_stereo(&mut buffer);
 
-        if is_recording && source_length < RECORD_SIZE {
-            sdram.lock(|sdram| {
+        // update scheduler
+        granulator.update_scheduler(Duration::from_secs_f32(AUDIO_CALLBACK_INTERVAL));
+
+        let is_recording = IS_RECORDING.load(Ordering::Relaxed);
+
+        // when recording
+        if is_recording {
+            let source_length = SOURCE_LENGTH.load(Ordering::Relaxed);
+
+            if source_length < sdram::SDRAM_SIZE {
+                // store incomong audio in memory
                 for (index, (right, left)) in buffer.iter().enumerate() {
-                    sdram[source_length + index] = (right + left) * 0.5;
+                    sdram[source_length + index] = *right;
                     audio.push_stereo((*right, *left)).unwrap();
                 }
-            });
 
-            ctx.shared
-                .source_length
-                .lock(|length| *length += buffer.len());
+                // update source length by buffer size of one channel
+                SOURCE_LENGTH.fetch_add(buffer.len(), Ordering::Relaxed);
+            } else {
+                // wrap around the SDRAM when overflowing
+                SOURCE_LENGTH.store(0, Ordering::Relaxed);
+
+                // store incomong audio in memory
+                for (index, (right, left)) in buffer.iter().enumerate() {
+                    sdram[source_length + index] = *right;
+                    audio.push_stereo((*right, *left)).unwrap();
+                }
+                SOURCE_LENGTH.fetch_add(buffer.len(), Ordering::Relaxed);
+            }
         }
 
+        // when playing
         if !is_recording {
-            granulator.lock(|granulator| {
-                for _ in buffer {
-                    let mono_sample = granulator.get_next_sample();
-                    audio.push_stereo((mono_sample, mono_sample)).unwrap();
-                }
-            });
+            // set audio buffer
+            let source_length = SOURCE_LENGTH.load(Ordering::Relaxed);
+            granulator.set_audio_buffer(&sdram[0..source_length]);
+
+            // update user settings
+            ctx.shared
+                .user_settings
+                .lock(|settings| granulator.update_all_user_settings(settings));
+
+            for _ in buffer {
+                // get next sample
+                let mono_sample = granulator.get_next_sample();
+                audio.push_stereo((mono_sample, mono_sample)).unwrap();
+            }
         }
     }
 
-    // read values from pot 2 and switch 2 of daisy pod
-    #[task(binds = TIM2, local = [cr, parameter_page, shift], shared = [granulator, recording_state_switched, is_recording])]
+    #[task(binds = TIM2, local = [cr], shared = [user_settings], priority = 3)]
     fn update_handler(mut ctx: update_handler::Context) {
         // clear TIM2 interrupt flag
         ctx.local.cr.timer2.clear_irq();
 
-        // get all hardware
-        let adc1 = &mut ctx.local.cr.adc1;
-        let pot1 = &mut ctx.local.cr.pot1;
-        let pot2 = &mut ctx.local.cr.pot2;
-        let switch1 = &mut ctx.local.cr.switch1;
-        let switch2 = &mut ctx.local.cr.switch2;
+        // ----------------------------------
+        // BUTTON, GATE INs AND LEDs
+        // ----------------------------------
+
+        // LEDs
         let led1 = &mut ctx.local.cr.led1;
         let led2 = &mut ctx.local.cr.led2;
-        let encoder = &mut ctx.local.cr.encoder;
+        let led3 = &mut ctx.local.cr.led3;
 
-        // local parameters
-        let parameter_page = ctx.local.parameter_page;
-        let shift = ctx.local.shift;
+        // binary devices
+        let button = &mut ctx.local.cr.button;
+        let gate1 = &mut ctx.local.cr.gate1;
+        let gate2 = &mut ctx.local.cr.gate2;
+        let gate3 = &mut ctx.local.cr.gate3;
+        let gate4 = &mut ctx.local.cr.gate4;
 
-        // shared
-        let mut granulator = ctx.shared.granulator;
-        let recording_state_switched = &mut ctx.shared.recording_state_switched;
-        let is_recording = &mut ctx.shared.is_recording;
+        // save all binary inputs at the beginning
+        button.save_state();
+        gate1.save_state();
+        gate2.save_state();
+        gate3.save_state();
+        gate4.save_state();
 
-        // update all the hardware
-        if let Ok(data) = adc1.read(pot1.get_pin()) {
-            pot1.update(data);
+        if gate1.is_saved_state_high() || gate3.is_saved_state_high() {
+            led1.set_high().unwrap();
+        } else {
+            led1.set_low().unwrap();
         }
-        if let Ok(data) = adc1.read(pot2.get_pin()) {
-            pot2.update(data);
-        }
-        led1.update();
-        led2.update();
-        switch1.update();
-        switch2.update();
-        encoder.update();
 
-        // parameter pages
-        if switch2.is_held() {
-            *parameter_page += 1;
-            if *parameter_page > 4 {
-                *parameter_page = 0;
+        if gate2.is_saved_state_high() || gate4.is_saved_state_high() {
+            led2.set_high().unwrap();
+        } else {
+            led2.set_low().unwrap();
+        }
+
+        if button.is_triggered() {
+            IS_RECORDING.fetch_xor(true, Ordering::Relaxed); // invert boolean
+        }
+
+        match IS_RECORDING.load(Ordering::Relaxed) {
+            true => {
+                if button.is_triggered() {
+                    rprintln!("Started recording incoming audio!");
+                    SOURCE_LENGTH.store(0, Ordering::Relaxed);
+                }
+
+                led3.set_high().unwrap();
+            }
+
+            false => {
+                if button.is_triggered() {
+                    rprintln!("Stopped recording incoming audio!");
+                    rprintln!(
+                        "Audio buffer gets set with length of {} samples!",
+                        SOURCE_LENGTH.load(Ordering::Relaxed)
+                    );
+                }
+
+                led3.set_low().unwrap();
             }
         }
 
-        if *parameter_page == 0 {
-            led2.set_simple_color(RGBColors::Blue);
-            granulator.lock(|g| {
-                g.set_parameter(GrainSize, pot1.get_value());
-                g.set_parameter(GrainSizeSpread, pot2.get_value());
-            });
-        }
-        if *parameter_page == 1 {
-            led2.set_simple_color(RGBColors::Green);
-            granulator.lock(|g| {
-                g.set_parameter(Offset, pot1.get_value());
-                g.set_parameter(OffsetSpread, pot2.get_value());
-            });
-        }
-        if *parameter_page == 2 {
-            led2.set_simple_color(RGBColors::Magenta);
-            granulator.lock(|g| {
-                g.set_parameter(Pitch, pot1.get_value());
-                g.set_parameter(PitchSpread, pot2.get_value());
-            });
-        }
-        if *parameter_page == 3 {
-            led2.set_simple_color(RGBColors::Cyan);
-            granulator.lock(|g| {
-                g.set_parameter(Delay, pot1.get_value());
-                g.set_parameter(DelaySpread, pot2.get_value());
-            });
-        }
-        if *parameter_page == 4 {
-            led2.set_simple_color(RGBColors::White);
-            granulator.lock(|g| {
-                g.set_parameter(ActiveGrains, pot1.get_value());
-                g.set_parameter(MasterVolume, pot2.get_value());
-            });
+        // can probably be spilt into two different task, since reading the ADCs needs more fine tuning
+
+        // ----------------------------------
+        // USER SETTINGS
+        // ----------------------------------
+
+        let adc_values = &mut ctx.local.cr.muxed_parameters;
+        let adc2 = &mut ctx.local.cr.adc2;
+        let master_volume = &mut ctx.local.cr.master_volume;
+
+        // read from ADC2
+        for i in 0..16 {
+            adc_values.read_value(i);
         }
 
-        // shift button
-        if switch1.is_held() {
-            *shift = !*shift;
-            recording_state_switched.lock(|f| *f = true);
-        } else {
-            recording_state_switched.lock(|f| *f = false);
+        // read from ADC1
+        if let Ok(data) = adc2.read(master_volume.get_pin()) {
+            master_volume.update(data);
         }
 
-        if *shift {
-            led1.set_simple_color(RGBColors::Red);
-            is_recording.lock(|f| *f = true);
-        } else {
-            led1.set_simple_color(RGBColors::Black);
-            is_recording.lock(|f| *f = false);
-        }
-
-        // update the scheduler
-        granulator.lock(|g| {
-            g.update_scheduler(core::time::Duration::from_millis(CONTROL_RATE_IN_MS as u64));
+        // update user settings
+        ctx.shared.user_settings.lock(|settings| {
+            settings.master_volume = master_volume.get_value() * 0.5;
+            settings.active_grains = adc_values.get_value(AdcMuxInputs::ActiveGrains as usize);
+            settings.offset = adc_values.get_value(AdcMuxInputs::Offset as usize);
+            settings.grain_size = adc_values.get_value(AdcMuxInputs::GrainSize as usize);
+            settings.pitch = adc_values.get_value(AdcMuxInputs::Pitch as usize);
+            settings.delay = adc_values.get_value(AdcMuxInputs::Delay as usize);
+            settings.velocity = adc_values.get_value(AdcMuxInputs::Velocity as usize);
+            settings.sp_offset = adc_values.get_value(AdcMuxInputs::OffsetSpread as usize);
+            settings.sp_grain_size = adc_values.get_value(AdcMuxInputs::GrainSizeSpread as usize);
+            settings.sp_pitch = adc_values.get_value(AdcMuxInputs::PitchSpread as usize);
+            settings.sp_velocity = adc_values.get_value(AdcMuxInputs::VelocitySpread as usize);
+            settings.sp_delay = adc_values.get_value(AdcMuxInputs::DelaySpread as usize);
+            settings.window_function =
+                (adc_values.get_value(AdcMuxInputs::Envelope as usize) * 6.0) as u8;
+            // settings.window_param = adc_values.get_value(AdcMuxInputs::WaveSelect as usize);
         });
     }
 
-    #[task(binds = TIM4, local = [vr], shared = [sdram, source_length, recording_state_switched, is_recording, granulator])]
-    fn display_handler(mut ctx: display_handler::Context) {
+    #[task(binds = TIM4, local = [vr], shared = [])]
+    fn display_handler(ctx: display_handler::Context) {
         // clear TIM2 interrupt flag
         ctx.local.vr.timer4.clear_irq();
-
-        // shared
-        let mut recording_state_switched = false;
-        ctx.shared
-            .recording_state_switched
-            .lock(|f| recording_state_switched = *f);
-        let mut is_recording = false;
-        ctx.shared.is_recording.lock(|f| is_recording = *f);
-
-        let mut source_length = 0;
-        ctx.shared.source_length.lock(|f| source_length = *f);
-
-        let mut sdram = ctx.shared.sdram;
-
-        // setup
-        let lcd = &mut ctx.local.vr.lcd;
-
-        if recording_state_switched {
-            use embedded_graphics::geometry::Point;
-            use embedded_graphics::pixelcolor::Rgb565;
-            use embedded_graphics::prelude::*;
-            if is_recording {
-                sdram.lock(|sdram| sdram.fill(0.0));
-                ctx.shared.source_length.lock(|length| *length = 0);
-                lcd.fill_subsection_with_corners(
-                    Point { x: 0, y: 0 },
-                    Point { x: 61, y: 7 },
-                    Rgb565::BLACK,
-                );
-                lcd.fill_subsection_with_corners(
-                    Point { x: 62, y: 0 },
-                    Point { x: 82, y: 7 },
-                    Rgb565::CSS_RED,
-                );
-                lcd.print_on_screen(0, 5, "recording: on");
-            } else {
-                lcd.fill_subsection_with_corners(
-                    Point { x: 0, y: 0 },
-                    Point { x: 61, y: 7 },
-                    Rgb565::BLACK,
-                );
-                lcd.fill_subsection_with_corners(
-                    Point { x: 61, y: 0 },
-                    Point { x: 87, y: 7 },
-                    Rgb565::BLACK,
-                );
-                lcd.print_on_screen(0, 5, "recording: off");
-
-                sdram.lock(|sdram| {
-                    let audio_buffer = &sdram[0..source_length];
-                    lcd.fill_subsection_with_corners(
-                        Point { x: 0, y: 60 },
-                        Point { x: 320, y: 180 },
-                        Rgb565::BLACK,
-                    );
-                    lcd.draw_waveform(audio_buffer);
-                    ctx.shared.granulator.lock(|g| {
-                        g.set_audio_buffer(audio_buffer);
-                    });
-                });
-            }
-        }
 
         // activate timer 4 interrupt
         rtic::pend(stm32h7xx_hal::interrupt::TIM4);
