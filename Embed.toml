@@ -44,7 +44,7 @@ connect_under_reset = false
 
 [default.rtt]
 # Whether or not an RTTUI should be opened after flashing.
-enabled = true
+enabled = false
 # How the target handles RTT outputs that won't fit in the buffer.  This can be
 # overridden per-channel. If left unset, the firmware will determine the default
 # for each RTT up channel.
