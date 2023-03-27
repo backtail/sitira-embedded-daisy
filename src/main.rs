@@ -255,11 +255,9 @@ mod app {
             master_volume.update(data);
         }
 
-        let window_function = (adc_values.get_value(AdcMuxInputs::Envelope as usize) * 6.0) as u8;
-        rprintln!("Window Function: {}", window_function);
         // update user settings
         ctx.shared.user_settings.lock(|settings| {
-            settings.master_volume = master_volume.get_value();
+            settings.master_volume = master_volume.get_value() * 0.5;
             settings.active_grains = adc_values.get_value(AdcMuxInputs::ActiveGrains as usize);
             settings.offset = adc_values.get_value(AdcMuxInputs::Offset as usize);
             settings.grain_size = adc_values.get_value(AdcMuxInputs::GrainSize as usize);
@@ -271,7 +269,8 @@ mod app {
             settings.sp_pitch = adc_values.get_value(AdcMuxInputs::PitchSpread as usize);
             settings.sp_velocity = adc_values.get_value(AdcMuxInputs::VelocitySpread as usize);
             settings.sp_delay = adc_values.get_value(AdcMuxInputs::DelaySpread as usize);
-            settings.window_function = window_function;
+            settings.window_function =
+                (adc_values.get_value(AdcMuxInputs::Envelope as usize) * 6.0) as u8;
             // settings.window_param = adc_values.get_value(AdcMuxInputs::WaveSelect as usize);
         });
     }
